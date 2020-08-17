@@ -93,7 +93,7 @@ static inline int diskmap_create(char *path){
     }
 
     init_size = _calc_alloc_align(sizeof(rptr_t));
-    if (_unlikely((lseek(fd, 0, SEEK_SET) == (off_t)(-1)) ||
+    if (_unlikely((lseek(fd, 0, SEEK_SET) == (off_t)(-1)) || \
                 (write(fd, &init_size, sizeof(rptr_t)) == -1))){
         close(fd);
         return -1;
