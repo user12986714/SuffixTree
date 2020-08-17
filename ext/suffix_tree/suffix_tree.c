@@ -361,13 +361,14 @@ static inline int u8str_append(diskmap_t *diskmap, rptr_t u8str, \
 
             if (_unlikely(_rs(u8str) -> metaidx_tail == \
                         _rs(u8str) -> metaidx_end)){
-                uint64_t new_end = (_rs(u8str) -> metaidx_end) << 1;
+                uint64_t old_end = (_rs(u8str) -> metaidx_end);
+                uint64_t new_end = ((old_end + 1) << 1) - 1;
                 rptr_t new_metaidx = diskmap_alloc(diskmap, \
-                        sizeof(new_end * sizeof(rptr_t)));
+                        (new_end + 1) * sizeof(rptr_t));
                 _err_if(!new_metaidx, -1);
 
                 memcpy(_rr(new_metaidx), _rrs(u8str), \
-                        _rs(u8str) -> metaidx_end);
+                        (old_end + 1) * sizeof(rptr_t));
 
                 _rs(u8str) -> metaidx_end = new_end;
                 _rs(u8str) -> metaidx = new_metaidx;
