@@ -1266,7 +1266,7 @@ typedef struct{
     pthread_mutex_t counter_mutex;
     pthread_mutex_t resource_mutex;
     uint64_t reader_counter;
-}rwlock_t;
+} rwlock_t;
 
 /* Initialize a rwlock */
 int rwlock_init(rwlock_t *rwlock){
