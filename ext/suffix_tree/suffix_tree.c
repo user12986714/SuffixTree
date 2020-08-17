@@ -1290,6 +1290,7 @@ void rwlock_rdlock(rwlock_t *rwlock){
         pthread_mutex_lock(&(rwlock -> resource_mutex));
     }
     (rwlock -> reader_counter)++;
+    pthread_mutex_unlock(&(rwlock -> counter_mutex));
     return;
 }
 
@@ -1300,6 +1301,7 @@ void rwlock_rdunlock(rwlock_t *rwlock){
     if (!(rwlock -> reader_counter)){
         pthread_mutex_unlock(&(rwlock -> resource_mutex));
     }
+    pthread_mutex_unlock(&(rwlock -> counter_mutex));
     return;
 }
 
