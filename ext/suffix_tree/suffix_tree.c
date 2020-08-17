@@ -1261,17 +1261,79 @@ __attribute__((hot)) rptr_t st_basic_search(diskmap_t *diskmap, \
 #undef _ac
 
 
-/* Part 5 - Ruby glueware */
+/* Part 5 - RWLock */
+typedef struct{
+    pthread_mutex_t counter_mutex;
+    pthread_mutex_t resource_mutex;
+    uint64_t reader_counter;
+}rwlock_t;
+
+/* Initialize a rwlock */
+int rwlock_init(rwlock_t *rwlock){
+    if (_unlikely(pthread_mutex_init(&(rwlock -> counter_mutex), \
+                    NULL) == -1)){
+        return -1;
+    }
+    if (_unlikely(pthread_mutex_init(&(rwlock -> resource_mutex), \
+                    NULL) == -1)){
+        pthread_mutex_destroy(&(rwlock -> counter_mutex));
+        return -1;
+    }
+    rwlock -> reader_counter = 0;
+    return 0;
+}
+
+/* Lock for read */
+void rwlock_rdlock(rwlock_t *rwlock){
+    pthread_mutex_lock(&(rwlock -> counter_mutex));
+    if (!(rwlock -> reader_counter)){
+        pthread_mutex_lock(&(rwlock -> resource_mutex));
+    }
+    (rwlock -> reader_counter)++;
+    return;
+}
+
+/* Unlock read locking */
+void rwlock_rdunlock(rwlock_t *rwlock){
+    pthread_mutex_lock(&(rwlock -> counter_mutex));
+    (rwlock -> reader_counter)--;
+    if (!(rwlock -> reader_counter)){
+        pthread_mutex_unlock(&(rwlock -> resource_mutex));
+    }
+    return;
+}
+
+/* Lock for write */
+void rwlock_wrlock(rwlock_t *rwlock){
+    pthread_mutex_lock(&(rwlock -> resource_mutex));
+    return;
+}
+
+/* Unlock write locking */
+void rwlock_wrunlock(rwlock_t *rwlock){
+    pthread_mutex_unlock(&(rwlock -> resource_mutex));
+    return;
+}
+
+/* Destroy a rwlock */
+void rwlock_destroy(rwlock_t *rwlock){
+    pthread_mutex_destroy(&(rwlock -> counter_mutex));
+    pthread_mutex_destroy(&(rwlock -> resource_mutex));
+    return;
+}
+
+
+/* Part 6 - Ruby glueware */
 typedef struct{
     diskmap_t diskmap;
     sttree_t tree;
-    pthread_rwlock_t rw_lock;
+    rwlock_t rw_lock;
 } suffix_tree_t;
 
 void suffix_tree_t_free(void *data){
     suffix_tree_t *typed_data = data;
     st_close(&(typed_data -> diskmap));
-    pthread_rwlock_destroy(&(typed_data -> rw_lock));
+    rwlock_destroy(&(typed_data -> rw_lock));
     free(typed_data);
     return;
 }
@@ -1302,12 +1364,12 @@ VALUE suffix_tree_t_initialize(VALUE self, VALUE path){
     suffix_tree_t *data;
     TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
 
-    if (_unlikely(pthread_rwlock_init(&(data -> rw_lock), NULL) == -1)){
+    if (_unlikely(rwlock_init(&(data -> rw_lock)) == -1)){
         rb_raise(rb_eRuntimeError, "RWLock initailization failure");
     }
     if (_unlikely(st_open(&(data -> diskmap), &(data -> tree), \
                     StringValueCStr(path)))){
-        pthread_rwlock_destroy(&(data -> rw_lock));
+        rwlock_destroy(&(data -> rw_lock));
         rb_raise(rb_eRuntimeError, "Open failure");
     }
     return self;
@@ -1315,19 +1377,25 @@ VALUE suffix_tree_t_initialize(VALUE self, VALUE path){
 
 void *get_rdlock(void *args){
     suffix_tree_t *typed_args = args;
-    pthread_rwlock_rdlock(&(typed_args -> rw_lock));
+    rwlock_rdlock(&(typed_args -> rw_lock));
     return NULL;
 }
 
 void *get_wrlock(void *args){
     suffix_tree_t *typed_args = args;
-    pthread_rwlock_wrlock(&(typed_args -> rw_lock));
+    rwlock_wrlock(&(typed_args -> rw_lock));
     return NULL;
 }
 
-void *release_lock(void *args){
+void *release_rdlock(void *args){
     suffix_tree_t *typed_args = args;
-    pthread_rwlock_unlock(&(typed_args -> rw_lock));
+    rwlock_rdunlock(&(typed_args -> rw_lock));
+    return NULL;
+}
+
+void *release_wrlock(void *args){
+    suffix_tree_t *typed_args = args;
+    rwlock_wrunlock(&(typed_args -> rw_lock));
     return NULL;
 }
 
@@ -1366,34 +1434,13 @@ void *gvl_free_basic_search(void *args){
     return NULL;
 }
 
-VALUE suffix_tree_rdlock(VALUE self){
-    suffix_tree_t *data;
-    TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
-    rb_thread_call_without_gvl(&get_rdlock, data, NULL, NULL);
-    return Qnil;
-}
-
-VALUE suffix_tree_wrlock(VALUE self){
-    suffix_tree_t *data;
-    TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
-    rb_thread_call_without_gvl(&get_wrlock, data, NULL, NULL);
-    return Qnil;
-}
-
-VALUE suffix_tree_unlock(VALUE self){
-    suffix_tree_t *data;
-    TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
-    rb_thread_call_without_gvl(&release_lock, data, NULL, NULL);
-    return Qnil;
-}
-
 VALUE suffix_tree_sync(VALUE self){
     suffix_tree_t *data;
     TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
 
     rb_thread_call_without_gvl(&get_rdlock, data, NULL, NULL);
     st_sync(&(data -> diskmap));
-    rb_thread_call_without_gvl(&release_lock, data, NULL, NULL);
+    rb_thread_call_without_gvl(&release_rdlock, data, NULL, NULL);
 
     return Qnil;
 }
@@ -1419,7 +1466,7 @@ VALUE suffix_tree_insert_string(VALUE self, VALUE u8string, \
             &(data -> diskmap)) -> str_tail + 1;
     if (_unlikely(u8str_append(&(data -> diskmap), \
                     (data -> tree).txt, u8_addr, u8_size) == -1)){
-        rb_thread_call_without_gvl(&release_lock, data, NULL, NULL);
+        rb_thread_call_without_gvl(&release_wrlock, data, NULL, NULL);
         rb_raise(rb_eRuntimeError, "String appending failure");
     }
     uint64_t end_idx = _r(u8str_t, (data -> tree).txt, \
@@ -1436,7 +1483,7 @@ VALUE suffix_tree_insert_string(VALUE self, VALUE u8string, \
 
     void *ret = rb_thread_call_without_gvl(&gvl_free_insert_string, \
             &insert_string_args, NULL, NULL);
-    rb_thread_call_without_gvl(&release_lock, data, NULL, NULL);
+    rb_thread_call_without_gvl(&release_wrlock, data, NULL, NULL);
 
     if (ret){
         rb_raise(rb_eRuntimeError, "String insertion failure");
@@ -1489,7 +1536,7 @@ VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
         result_ptr = _r(sttag_t, result_ptr, &(data -> diskmap)) -> next;
     }
 
-    rb_thread_call_without_gvl(&release_lock, data, NULL, NULL);
+    rb_thread_call_without_gvl(&release_rdlock, data, NULL, NULL);
     return result_arr;
 }
 
@@ -1498,9 +1545,6 @@ void Init_suffix_tree(){
     VALUE cSuffixTree = rb_define_class("SuffixTree", rb_cObject);
     rb_define_alloc_func(cSuffixTree, &suffix_tree_t_alloc);
     rb_define_method(cSuffixTree, "initialize", &suffix_tree_t_initialize, 1);
-    rb_define_method(cSuffixTree, "rdlock!", &suffix_tree_rdlock, 0);
-    rb_define_method(cSuffixTree, "wrlock!", &suffix_tree_wrlock, 0);
-    rb_define_method(cSuffixTree, "unlock!", &suffix_tree_unlock, 0);
     rb_define_method(cSuffixTree, "sync!", &suffix_tree_sync, 0);
     rb_define_method(cSuffixTree, "sync_async", &suffix_tree_sync_async, 0);
     rb_define_method(cSuffixTree, "insert", &suffix_tree_insert_string, 3);
