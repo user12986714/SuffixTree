@@ -199,7 +199,6 @@ static inline void diskmap_close(diskmap_t *diskmap){
  *
  * We treat a utf-8 encoded string as a binary blob and index on a byte, rather
  * than on a codepoint, level */
-
 #ifndef _char_shift
 #define _char_shift 16
 #define _char_mask 65535
@@ -265,8 +264,6 @@ typedef struct{
 #define _rirst(x) (_ri(_rrs(x)[_rs(x) -> metaidx_tail]))
 #define _rcirst(x) (_rc((_rirst(x) -> idx)[_rirst(x) -> tail]))
 #define _rtcirst(x) ((_rcirst(x) -> txt)[_rcirst(x) -> tail])
-
-#define _addr_diff(x, y) ((char *)(x) - (char *)(y))
 
 /* Create a new utf-8 string */
 static inline rptr_t u8str_create(diskmap_t *diskmap){
@@ -436,7 +433,6 @@ static inline __attribute__((hot)) char u8str_read(diskmap_t *diskmap, \
 #undef _rirst
 #undef _rcirst
 #undef _rtcirst
-#undef _addr_diff
 
 
 /* Part 3 - AVL tree
