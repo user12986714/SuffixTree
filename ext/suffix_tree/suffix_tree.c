@@ -82,11 +82,9 @@ typedef struct{
 /* Create new diskmap */
 static inline int diskmap_create(char *path){
     int fd = open(path, _create_flags, _create_mode);
-    if (_unlikely(fd == -1)){
-        return -1;
-    }
+    _err_if(fd == -1, -1);
 
-    rptr_t init_size = _calc_alloc_align(sizeof(rptr_t));
+    rptr_t init_size = _calc_disk_align(sizeof(rptr_t));
     if (_unlikely(ftruncate(fd, init_size) == -1)){
         close(fd);
         return -1;
@@ -103,13 +101,23 @@ static inline int diskmap_create(char *path){
     return 0;
 }
 
+static inline diskmap_placement_create(char *path){
+    int fd = open(path, _open_flags);
+    _err_if(fd == -1, -1);
+    rptr_t init_size = _calc_alloc_align(sizeof(rptr_t));
+    if (_unlikely((lseek(fd, 0, SEEK_SET) == (off_t)(-1)) | \
+                    (write(fd, &init_size, sizeof(rptr_t)) == -1))){
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
 /* Open a diskmap */
 static inline int diskmap_open(diskmap_t *diskmap, char *path){
     diskmap -> fd = open(path, _open_flags);
-    if (_unlikely(diskmap -> fd == -1)){
-        close(diskmap -> fd);
-        return -1;
-    }
+    _err_if(diskmap -> fd == -1, -1);
 
     struct stat file_stat;
     fstat(diskmap -> fd, &file_stat);
@@ -852,6 +860,37 @@ __attribute__((cold)) int st_create(char *path){
     return 0;
 }
 
+__attribute__((cold)) int st_placement_create(char *path){
+    _err_if(diskmap_placement_create(path) == -1, -1);
+
+    diskmap_t diskmap;
+    _err_if(diskmap_open(&diskmap, path) == -1, -1);
+
+    rptr_t core_tree = diskmap_alloc(&diskmap, sizeof(stcore_t));
+    /* If allocation failed or not allocating to a correct relative address,
+     * hard fail. This means no two trees may share a diskmap */
+    _err_if(core_tree != sizeof(rptr_t), -1);
+
+    rptr_t txt = u8str_create(&diskmap);
+    _err_if(!txt, -1);
+
+    rptr_t root = diskmap_alloc(&diskmap, sizeof(struct stnode_s));
+    _err_if(!root, -1);
+
+    _r(struct stnode_s, root, &diskmap) -> parent = 0;
+    _r(struct stnode_s, root, &diskmap) -> children = 0;
+    _r(struct stnode_s, root, &diskmap) -> link = 0;
+    _r(struct stnode_s, root, &diskmap) -> start_idx = 0;
+    _r(struct stnode_s, root, &diskmap) -> end_idx = 0;
+    _r(struct stnode_s, root, &diskmap) -> tags = 0;
+
+    _r(stcore_t, core_tree, &diskmap) -> txt = txt;
+    _r(stcore_t, core_tree, &diskmap) -> root = root;
+
+    diskmap_close(&diskmap);
+    return 0;
+}
+
 __attribute__((cold)) int st_open(diskmap_t *diskmap, \
         sttree_t *tree, char *path){
     _err_if(diskmap_open(diskmap, path) == -1, -1);
@@ -1351,6 +1390,13 @@ VALUE suffix_tree_create(VALUE self, VALUE path){
     return Qnil;
 }
 
+VALUE suffix_tree_placement_create(VALUE self, VALUE path){
+    if (_unlikely(st_placement_create(StringValueCStr(path)) == -1)){
+        rb_raise(rb_eRuntimeError, "Creation failure");
+    }
+    return Qnil;
+}
+
 VALUE suffix_tree_t_alloc(VALUE self){
     suffix_tree_t *data = malloc(sizeof(suffix_tree_t));
     if (_unlikely(!data)){
@@ -1541,6 +1587,8 @@ VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
 
 void Init_suffix_tree(){
     rb_define_global_function("__suffix_tree_create!", &suffix_tree_create, 1);
+    rb_define_global_function("__suffix_tree_placement_create!", \
+            &suffix_tree_placement_create, 1);
     VALUE cSuffixTree = rb_define_class("SuffixTree", rb_cObject);
     rb_define_alloc_func(cSuffixTree, &suffix_tree_t_alloc);
     rb_define_method(cSuffixTree, "initialize", &suffix_tree_t_initialize, 1);
