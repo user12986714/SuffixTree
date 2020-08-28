@@ -9,6 +9,11 @@
 #warning "Only gcc is currently supported. Random issues may occur."
 #endif
 
+#include <ruby.h>
+#include <ruby/thread.h>
+#include <pthread.h>
+#include <stdlib.h>
+
 #include <stdint.h>
 #include <string.h>
 #include <sys/types.h>
@@ -25,8 +30,6 @@
 #define _err_if(x, _return_value) if (_unlikely(x)){ \
     return _return_value; \
 }
-
-#define DEBUG_BUILD
 
 #ifdef DEBUG_BUILD
 #define _assert(x) if (_unlikely(!(x))){*(uint64_t *)(0) = 0xABADCAFE;}
@@ -192,6 +195,13 @@ _mk_alloc_func(alloc_node, node_pool_t, node_t, node_id_t);
 _mk_resolve_func(resolve_node, node_pool_t, node_t, node_id_t);
 
 /* Suffix tree */
+typedef struct all_pools_s{
+    str_pool_t str_pool;
+    tag_pool_t tag_pool;
+    child_pool_t child_pool;
+    node_pool_t node_pool;
+} all_pools_t;
+
 typedef struct active_point_s{
     node_id_t node;
     uint64_t len;
@@ -200,12 +210,7 @@ typedef struct active_point_s{
 } active_point_t;
 
 typedef struct tree_s{
-    struct{
-        str_pool_t str_pool;
-        tag_pool_t tag_pool;
-        child_pool_t child_pool;
-        node_pool_t node_pool;
-    } pools;
+    all_pools_t pools;
     active_point_t active_point;
     node_id_t root;
     node_id_t last_node;
@@ -214,7 +219,7 @@ typedef struct tree_s{
 
 
 /* String */
-static inline uint64_t add_string(str_pool_t *pool, char *src, uint64_t len){
+static inline str_idx_t add_string(str_pool_t *pool, char *src, uint64_t len){
     uint64_t used_size = *((uint64_t *)(pool -> addr));
     uint64_t new_used_size = used_size + len;
     _err_if(new_used_size < used_size, -1);  /* Overflow */
@@ -285,6 +290,11 @@ static inline int add_tag_to_node(tag_pool_t *tag_pool, node_pool_t *node_pool, 
     }
 
     return 0;
+}
+
+_composable uint64_t is_wanted_tag(tag_pool_t *pool, \
+        tag_id_t tag, uint64_t type){
+    return (type & resolve_tag(pool, tag) -> type);
 }
 
 
@@ -653,8 +663,16 @@ _composable char ac_of(tree_t *tree){
     return ap_of(tree) -> ch;
 }
 
+_composable str_idx_t t_add_string(tree_t *tree, char *src, uint64_t len){
+    return add_string(sp_of(tree), src, len);
+}
+
 _composable char t_str_idx(tree_t *tree, str_idx_t idx){
     return str_idx(sp_of(tree), idx);
+}
+
+_composable uint64_t t_str_size(tree_t *tree){
+    return str_size(sp_of(tree));
 }
 
 _composable tag_t *t_resolve_tag(tree_t *tree, tag_id_t id){
@@ -684,6 +702,10 @@ _composable int t_add_tag_to_node(tree_t *tree, node_id_t node, \
             node, type, id);
 }
 
+_composable uint64_t t_is_wanted_tag(tree_t *tree, tag_id_t tag, uint64_t type){
+    return is_wanted_tag(tp_of(tree), tag, type);
+}
+
 _composable node_id_t t_find_child(tree_t *tree, node_id_t node, char ch){
     return find_child(cp_of(tree), np_of(tree), node, ch);
 }
@@ -697,10 +719,6 @@ _composable void t_change_child(tree_t *tree, node_id_t parent, \
 _composable int t_add_child(tree_t *tree, node_id_t parent, \
         char ch, node_id_t child){
     return add_child(cp_of(tree), np_of(tree), parent, ch, child);
-}
-
-_composable node_id_t find_active_node_child(tree_t *tree, char ch){
-    return t_find_child(tree, ap_of(tree) -> node, ch);
 }
 
 _composable uint64_t t_len_edge(tree_t *tree, node_id_t node){
@@ -794,13 +812,13 @@ static inline int add_char_to_tree(tree_t *tree, str_idx_t idx, char ch, \
     while (tree -> implicit_suffix){
         node_id_t next_node;
         while (al_of(tree) && \
-                (next_node = find_active_node_child(tree, ac_of(tree))) && \
+                (next_node = t_find_child(tree, an_of(tree), ac_of(tree))) && \
                 walkdown(tree, next_node));
 
         if (!al_of(tree)){
             ap_of(tree) -> edge = idx;
             ap_of(tree) -> ch = ch;
-            next_node = find_active_node_child(tree, ch);
+            next_node = t_find_child(tree, an_of(tree), ch);
 
             if (!next_node){
                 next_node = t_create_node(tree, an_of(tree), idx, tail_idx);
@@ -860,4 +878,441 @@ static inline int add_char_to_tree(tree_t *tree, str_idx_t idx, char ch, \
     }
 
     return 0;
+}
+
+int add_string_to_tree(tree_t *tree, str_idx_t start_idx, str_idx_t end_idx, \
+        uint64_t type, uint64_t id){
+    while (start_idx <= end_idx){
+        char ch = t_str_idx(tree, start_idx);
+        _err_if(add_char_to_tree(tree, \
+                    start_idx, ch, end_idx, type, id) == -1, -1);
+        start_idx++;
+    }
+
+    while (tree -> implicit_suffix){
+        node_id_t next_node;
+        while (al_of(tree) && \
+                (next_node = t_find_child(tree, an_of(tree), ac_of(tree))) && \
+                walkdown(tree, next_node));
+
+        if(!al_of(tree)){
+            maybe_update_link(tree, an_of(tree));
+            _err_if(t_add_tag_to_node(tree, an_of(tree), type, id) == -1, -1);
+        }
+        else{
+            _assert(next_node);
+            char next_ch = t_str_idx(tree, \
+                    t_resolve_node(tree, next_node) -> start_idx + al_of(tree));
+            node_id_t split_node = split_edge(tree, next_node, \
+                    al_of(tree) - 1, next_ch, an_of(tree), ac_of(tree));
+            _err_if(!split_node, -1);
+            _err_if(t_add_tag_to_node(tree, split_node, type, id) == -1, -1);
+        }
+
+        (tree -> implicit_suffix)--;
+        if (an_of(tree) == tree -> root){
+            if (al_of(tree)){
+                (ap_of(tree) -> len)--;
+                ap_of(tree) -> edge = end_idx - tree -> implicit_suffix + 1;
+                ap_of(tree) -> ch = t_str_idx(tree, ae_of(tree));
+            }
+        }
+        else{
+            ap_of(tree) -> node = t_resolve_node(tree, an_of(tree)) -> link;
+        }
+    }
+
+    _assert(!(tree -> implicit_suffix));
+    _assert(an_of(tree) == tree -> root);
+    _assert(!al_of(tree));
+
+    return 0;
+}
+
+tag_list_head_t basic_search(tree_t *tree, char *pattern, uint64_t size){
+    node_id_t current_node = tree -> root;
+    char *current_char = pattern;
+
+    while (current_char - pattern < size){
+        char ch = *(current_char++);
+        if (!(current_node = t_find_child(tree, current_node, ch))){
+            return 0;  /* No match */
+        }
+
+        str_idx_t current_idx = t_resolve_node(tree, \
+                current_node) -> start_idx;
+        while ((current_idx++ < \
+                    t_resolve_node(tree, current_node) -> end_idx) && \
+                (current_char - pattern < size)){
+            if (*(current_char++) != t_str_idx(tree, current_idx)){
+                return 0;
+            }
+        }
+    }
+
+    return t_resolve_node(tree, current_node) -> tags;
+}
+
+_composable int open_all_pools(tree_t *tree, \
+        char *str_path, char *tag_path, char *child_path, char *node_path){
+    if (_unlikely(pool_open(sp_of(tree), str_path) == -1)){
+        return -1;
+    }
+    if (_unlikely(pool_open(tp_of(tree), tag_path) == -1)){
+        pool_close(sp_of(tree));
+        return -1;
+    }
+    if (_unlikely(pool_open(cp_of(tree), child_path) == -1)){
+        pool_close(sp_of(tree));
+        pool_close(tp_of(tree));
+        return -1;
+    }
+    if (_unlikely(pool_open(np_of(tree), node_path) == -1)){
+        pool_close(sp_of(tree));
+        pool_close(tp_of(tree));
+        pool_close(cp_of(tree));
+        return -1;
+    }
+    return 0;
+}
+
+_composable void sync_all_pools(tree_t *tree){
+    pool_sync(sp_of(tree));
+    pool_sync(tp_of(tree));
+    pool_sync(cp_of(tree));
+    pool_sync(np_of(tree));
+
+    return;
+}
+
+_composable void close_all_pools(tree_t *tree){
+    pool_close(sp_of(tree));
+    pool_close(tp_of(tree));
+    pool_close(cp_of(tree));
+    pool_close(np_of(tree));
+
+    return;
+}
+
+int create_tree(char *str_path, char *tag_path, \
+        char *child_path, char *node_path){
+    _err_if(pool_create(str_path) == -1, -1);
+    _err_if(pool_create(tag_path) == -1, -1);
+    _err_if(pool_create(child_path) == -1, -1);
+    _err_if(pool_create(node_path) == -1, -1);
+
+    tree_t tree;
+    _err_if(open_all_pools(&tree, \
+                str_path, tag_path, child_path, node_path) == -1, -1);
+    node_id_t root = create_node(np_of(&tree), 0, 0, 0, 0);
+    _err_if(root != sizeof(uint64_t), -1);
+
+    close_all_pools(&tree);
+    return 0;
+}
+
+int open_tree(tree_t *tree, \
+        char *str_path, char *tag_path, char *child_path, char *node_path){
+    _err_if(open_all_pools(tree, \
+                str_path, tag_path, child_path, node_path) == -1, -1);
+    tree -> root = sizeof(uint64_t);
+    tree -> last_node = 0;
+    tree -> implicit_suffix = 0;
+
+    ap_of(tree) -> node = tree -> root;
+    ap_of(tree) -> len = 0;
+    ap_of(tree) -> edge = 0;
+    ap_of(tree) -> ch = 0xFF;
+
+    return 0;
+}
+
+void sync_tree(tree_t *tree){
+    sync_all_pools(tree);
+    return;
+}
+
+void close_tree(tree_t *tree){
+    close_all_pools(tree);
+    return;
+}
+
+
+/* RWLock */
+typedef struct{
+    pthread_mutex_t counter_mutex;
+    pthread_mutex_t resource_mutex;
+    uint64_t reader_counter;
+} rwlock_t;
+
+/* Initialize a rwlock */
+int rwlock_init(rwlock_t *rwlock){
+    if (_unlikely(pthread_mutex_init(&(rwlock -> counter_mutex), \
+                    NULL) == -1)){
+        return -1;
+    }
+    if (_unlikely(pthread_mutex_init(&(rwlock -> resource_mutex), \
+                    NULL) == -1)){
+        pthread_mutex_destroy(&(rwlock -> counter_mutex));
+        return -1;
+    }
+    rwlock -> reader_counter = 0;
+    return 0;
+}
+
+/* Lock for read */
+void rwlock_rdlock(rwlock_t *rwlock){
+    pthread_mutex_lock(&(rwlock -> counter_mutex));
+    if (!(rwlock -> reader_counter)){
+        pthread_mutex_lock(&(rwlock -> resource_mutex));
+    }
+    (rwlock -> reader_counter)++;
+    pthread_mutex_unlock(&(rwlock -> counter_mutex));
+    return;
+}
+
+/* Unlock read locking */
+void rwlock_rdunlock(rwlock_t *rwlock){
+    pthread_mutex_lock(&(rwlock -> counter_mutex));
+    (rwlock -> reader_counter)--;
+    if (!(rwlock -> reader_counter)){
+        pthread_mutex_unlock(&(rwlock -> resource_mutex));
+    }
+    pthread_mutex_unlock(&(rwlock -> counter_mutex));
+    return;
+}
+
+/* Lock for write */
+void rwlock_wrlock(rwlock_t *rwlock){
+    pthread_mutex_lock(&(rwlock -> resource_mutex));
+    return;
+}
+
+/* Unlock write locking */
+void rwlock_wrunlock(rwlock_t *rwlock){
+    pthread_mutex_unlock(&(rwlock -> resource_mutex));
+    return;
+}
+
+/* Destroy a rwlock */
+void rwlock_destroy(rwlock_t *rwlock){
+    pthread_mutex_destroy(&(rwlock -> counter_mutex));
+    pthread_mutex_destroy(&(rwlock -> resource_mutex));
+    return;
+}
+
+
+/* Ruby glueware */
+typedef struct suffix_tree_s{
+    tree_t tree;
+    rwlock_t rw_lock;
+} suffix_tree_t;
+
+void suffix_tree_t_free(void *data){
+    suffix_tree_t *typed_data = data;
+    close_tree(&(typed_data -> tree));
+    rwlock_destroy(&(typed_data -> rw_lock));
+    free(typed_data);
+    return;
+}
+
+static const rb_data_type_t suffix_tree_t_type = {
+    .wrap_struct_name = "suffix_tree_t",
+    .function = {
+        .dfree = &suffix_tree_t_free
+    }
+};
+
+VALUE suffix_tree_create(VALUE self, VALUE str_path, VALUE tag_path, \
+        VALUE child_path, VALUE node_path){
+    if (_unlikely(create_tree(StringValueCStr(str_path), \
+                    StringValueCStr(tag_path), \
+                    StringValueCStr(child_path), \
+                    StringValueCStr(node_path)) == -1)){
+        rb_raise(rb_eRuntimeError, "Creation failure");
+    }
+
+    return Qnil;
+}
+
+VALUE suffix_tree_t_alloc(VALUE self){
+    suffix_tree_t *data = malloc(sizeof(suffix_tree_t));
+    if (_unlikely(!data)){
+        rb_raise(rb_eRuntimeError, "Allocation failure");
+    }
+    return TypedData_Wrap_Struct(self, &suffix_tree_t_type, data);
+}
+
+VALUE suffix_tree_initialize(VALUE self, VALUE str_path, VALUE tag_path, \
+        VALUE child_path, VALUE node_path){
+    suffix_tree_t *data;
+    TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
+
+    if (_unlikely(rwlock_init(&(data -> rw_lock)) == -1)){
+        rb_raise(rb_eRuntimeError, "RWLock initialization failure");
+    }
+
+    if (_unlikely(open_tree(&(data -> tree), StringValueCStr(str_path), \
+                    StringValueCStr(tag_path), \
+                    StringValueCStr(child_path), \
+                    StringValueCStr(node_path)) == -1)){
+        rwlock_destroy(&(data -> rw_lock));
+        rb_raise(rb_eRuntimeError, "Open failure");
+    }
+    return self;
+}
+
+void *get_rdlock(void *args){
+    suffix_tree_t *typed_args = args;
+    rwlock_rdlock(&(typed_args -> rw_lock));
+    return NULL;
+}
+
+void *get_wrlock(void *args){
+    suffix_tree_t *typed_args = args;
+    rwlock_wrlock(&(typed_args -> rw_lock));
+    return NULL;
+}
+
+void *release_rdlock(void *args){
+    suffix_tree_t *typed_args = args;
+    rwlock_rdunlock(&(typed_args -> rw_lock));
+    return NULL;
+}
+
+void *release_wrlock(void *args){
+    suffix_tree_t *typed_args = args;
+    rwlock_wrunlock(&(typed_args -> rw_lock));
+    return NULL;
+}
+
+typedef struct{
+    tree_t *tree;
+    str_idx_t start_idx;
+    str_idx_t end_idx;
+    uint64_t type;
+    uint64_t id;
+} insert_string_args_t;
+
+typedef struct{
+    tree_t *tree;
+    char *pattern_addr;
+    uint64_t pattern_size;
+    tag_list_head_t result;
+} basic_search_args_t;
+
+void *gvl_free_insert_string(void *args){
+    insert_string_args_t *typed_args = args;
+    if (_unlikely(add_string_to_tree(typed_args -> tree, \
+                    typed_args -> start_idx, typed_args -> end_idx, \
+                    typed_args -> type, typed_args -> id) == -1)){
+        return (void *)(0xABADCAFE);
+    }
+    return NULL;
+}
+
+void *gvl_free_basic_search(void *args){
+    basic_search_args_t *typed_args = args;
+    typed_args -> result = basic_search(typed_args -> tree, \
+            typed_args -> pattern_addr, typed_args -> pattern_size);
+    return NULL;
+}
+
+VALUE suffix_tree_sync(VALUE self){
+    suffix_tree_t *data;
+    TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
+
+    rb_thread_call_without_gvl(&get_rdlock, data, NULL, NULL);
+    sync_tree(&(data -> tree));
+    rb_thread_call_without_gvl(&release_rdlock, data, NULL, NULL);
+
+    return Qnil;
+}
+
+VALUE suffix_tree_insert_string(VALUE self, VALUE u8string, VALUE type, VALUE id){
+    suffix_tree_t *data;
+    TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
+
+    rb_thread_call_without_gvl(&get_wrlock, data, NULL, NULL);
+
+    char *u8_addr = StringValuePtr(u8string);
+    uint64_t u8_size = RSTRING_LEN(u8string);
+
+    str_idx_t start_idx = t_add_string(&(data -> tree), u8_addr, u8_size);
+    if (_unlikely(start_idx == -1)){
+        rb_thread_call_without_gvl(&release_wrlock, data, NULL, NULL);
+        rb_raise(rb_eRuntimeError, "String appending failure");
+    }
+    str_idx_t end_idx = t_str_size(&(data -> tree)) - 1;
+
+    insert_string_args_t insert_string_args = {
+        .tree = &(data -> tree),
+        .start_idx = start_idx,
+        .end_idx = end_idx,
+        .type = NUM2ULL(type),
+        .id = NUM2ULL(id)
+    };
+    void *ret = rb_thread_call_without_gvl(&gvl_free_insert_string, \
+            &insert_string_args, NULL, NULL);
+    rb_thread_call_without_gvl(&release_wrlock, data, NULL, NULL);
+
+    if (_unlikely(ret)){
+        rb_raise(rb_eRuntimeError, "String insertion failure");
+    }
+
+    return self;
+}
+
+VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
+    suffix_tree_t *data;
+    TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
+
+    rb_thread_call_without_gvl(get_rdlock, data, NULL, NULL);
+
+    tag_list_head_t result;
+    uint64_t pattern_size = RSTRING_LEN(u8pattern);
+    char *pattern_addr = malloc(pattern_size);
+
+    if (_likely(pattern_addr)){
+        memcpy(pattern_addr, StringValuePtr(u8pattern), pattern_size);
+        basic_search_args_t basic_search_args = {
+            .tree = &(data -> tree),
+            .pattern_addr = pattern_addr,
+            .pattern_size = pattern_size
+        };
+
+        rb_thread_call_without_gvl(&gvl_free_basic_search, \
+                &basic_search_args, NULL, NULL);
+        result = basic_search_args.result;
+        
+        free(pattern_addr);
+    }
+    else{
+        result = basic_search(&(data -> tree), \
+                StringValuePtr(u8pattern), pattern_size);
+    }
+
+    uint64_t type_mask = NUM2ULL(type);
+    VALUE result_arr = rb_ary_new();
+    while (result){
+        if (t_is_wanted_tag(&(data -> tree), result, type_mask)){
+            rb_ary_push(result_arr, \
+                    ULL2NUM(t_resolve_tag(&(data -> tree), result) -> id));
+        }
+        result = t_resolve_tag(&(data -> tree), result) -> next;
+    }
+
+    rb_thread_call_without_gvl(&release_rdlock, data, NULL, NULL);
+    return result_arr;
+}
+
+void Init_suffix_tree(){
+    rb_define_global_function("__suffix_tree_create!", &suffix_tree_create, 4);
+    VALUE cSuffixTree = rb_define_class("SuffixTree", rb_cObject);
+    rb_define_alloc_func(cSuffixTree, &suffix_tree_t_alloc);
+    rb_define_method(cSuffixTree, "initialize", &suffix_tree_initialize, 4);
+    rb_define_method(cSuffixTree, "sync!", &suffix_tree_sync, 0);
+    rb_define_method(cSuffixTree, "insert", &suffix_tree_insert_string, 3);
+    rb_define_method(cSuffixTree, "basic_search", &suffix_tree_basic_search, 2);
+    return;
 }
