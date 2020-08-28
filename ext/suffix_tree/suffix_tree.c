@@ -303,6 +303,37 @@ static inline int add_tag_to_node(tag_pool_t *tag_pool, node_pool_t *node_pool, 
     return 0;
 }
 
+/* Copy all tags of src to dest, assuming dest has no tags previously */
+_composable int copy_tags(tag_pool_t *tag_pool, node_pool_t *node_pool, \
+        node_id_t dest, node_id_t src){
+    if (_likely(resolve_node(node_pool, src) -> tags)){
+        tag_id_t current_tag = resolve_node(node_pool, src) -> tags;
+        uint64_t id = resolve_tag(tag_pool, current_tag) -> id;
+        uint64_t type = resolve_tag(tag_pool, current_tag) -> type;
+
+        tag_id_t new_tag = create_tag(tag_pool, type, id);
+        _err_if(!new_tag, -1);
+
+        resolve_node(node_pool, dest) -> tags = new_tag;
+
+        tag_id_t previous_tag = new_tag;
+        current_tag = resolve_tag(tag_pool, current_tag) -> next;
+        while (current_tag){
+            id = resolve_tag(tag_pool, current_tag) -> id;
+            type = resolve_tag(tag_pool, current_tag) -> type;
+
+            new_tag = create_tag(tag_pool, type, id);
+            _err_if(!new_tag, -1);
+
+            resolve_tag(tag_pool, previous_tag) -> next = new_tag;
+            previous_tag = new_tag;
+            current_tag = resolve_tag(tag_pool, current_tag) -> next;
+        }
+    }
+
+    return 0;
+}
+
 /* Given a type bitmask, decide if the given tag is wanted */
 _composable uint64_t is_wanted_tag(tag_pool_t *pool, \
         tag_id_t tag, uint64_t type){
@@ -750,6 +781,10 @@ _composable int t_add_tag_to_node(tree_t *tree, node_id_t node, \
             node, type, id);
 }
 
+_composable int t_copy_tags(tree_t *tree, node_id_t dest, node_id_t src){
+    return copy_tags(tp_of(tree), np_of(tree), dest, src);
+}
+
 _composable uint64_t t_is_wanted_tag(tree_t *tree, tag_id_t tag, uint64_t type){
     return is_wanted_tag(tp_of(tree), tag, type);
 }
@@ -819,30 +854,7 @@ static inline node_id_t split_edge(tree_t *tree, \
                 t_resolve_node(tree, orig_node) -> start_idx, split_idx);
         _err_if(!split_node, 0);
 
-        if (_likely(t_resolve_node(tree, orig_node) -> tags)){
-            tag_id_t current_tag = t_resolve_node(tree, orig_node) -> tags;
-            uint64_t id = t_resolve_tag(tree, current_tag) -> id;
-            uint64_t type = t_resolve_tag(tree, current_tag) -> type;
-
-            tag_id_t new_tag = t_create_tag(tree, type, id);
-            _err_if(!new_tag, 0);
-
-            t_resolve_node(tree, split_node) -> tags = new_tag;
-
-            tag_id_t previous_tag = new_tag;
-            current_tag = t_resolve_tag(tree, current_tag) -> next;
-            while (current_tag){
-                id = t_resolve_tag(tree, current_tag) -> id;
-                type = t_resolve_tag(tree, current_tag) -> type;
-
-                new_tag = t_create_tag(tree, type, id);
-                _err_if(!new_tag, 0);
-
-                t_resolve_tag(tree, previous_tag) -> next = new_tag;
-                previous_tag = new_tag;
-                current_tag = t_resolve_tag(tree, current_tag) -> next;
-            }
-        }
+        _err_if(t_copy_tags(tree, split_node, orig_node) == -1, 0);
 
         t_change_child(tree, parent_node, parent_ch, split_node);
         t_resolve_node(tree, orig_node) -> parent = split_node;
