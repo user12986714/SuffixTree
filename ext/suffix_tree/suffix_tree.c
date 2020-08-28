@@ -61,6 +61,7 @@ typedef struct pool_s{
     uint64_t size;
 } pool_t;
 
+/* Create a pool */
 static inline int pool_create(char *path){
     int fd = open(path, _create_flags, _create_mode);
     _err_if(fd == -1, -1);
@@ -80,6 +81,7 @@ static inline int pool_create(char *path){
     return 0;
 }
 
+/* Open a pool */
 static inline int pool_open(pool_t *pool, char *path){
     pool -> fd = open(path, _open_flags);
     _err_if(pool -> fd == -1, -1);
@@ -98,13 +100,16 @@ static inline int pool_open(pool_t *pool, char *path){
     return 0;
 }
 
+/* Sync a pool with backend file */
 _composable void pool_sync(pool_t *pool){
     msync(pool -> addr, pool -> size, MS_SYNC);
     return;
 }
 
+/* See if the pool is large enough, and expand it if not */
 _composable int pool_maybe_expand(pool_t *pool, uint64_t size){
     if (_unlikely(size > pool -> size)){
+        /* Need expansion */
         pool_sync(pool);
 
         uint64_t new_size = _calc_align(size);
@@ -121,6 +126,7 @@ _composable int pool_maybe_expand(pool_t *pool, uint64_t size){
     return 0;
 }
 
+/* Close a pool */
 static inline void pool_close(pool_t *pool){
     pool_sync(pool);
     munmap(pool -> addr, pool -> size);
@@ -219,6 +225,7 @@ typedef struct tree_s{
 
 
 /* String */
+/* Add a new string to the string pool (i.e. append it to the giant string */
 static inline str_idx_t add_string(str_pool_t *pool, char *src, uint64_t len){
     uint64_t used_size = *((uint64_t *)(pool -> addr));
     uint64_t new_used_size = used_size + len;
@@ -231,6 +238,7 @@ static inline str_idx_t add_string(str_pool_t *pool, char *src, uint64_t len){
     return used_size;
 }
 
+/* Get the char at the given index */
 _composable char str_idx(str_pool_t *pool, str_idx_t idx){
     if (_likely(idx < pool -> size)){
         return *(pool -> addr + idx);
@@ -240,12 +248,14 @@ _composable char str_idx(str_pool_t *pool, str_idx_t idx){
     }
 }
 
+/* Size of the entire giant string */
 _composable uint64_t str_size(str_pool_t *pool){
     return *((uint64_t *)(pool -> addr));
 }
 
 
 /* Tags */
+/* Create a new tag with given type and id */
 static inline tag_id_t create_tag(tag_pool_t *pool, uint64_t type, uint64_t id){
     tag_id_t tag = alloc_tag(pool);
     _err_if(!tag, 0);
@@ -257,6 +267,7 @@ static inline tag_id_t create_tag(tag_pool_t *pool, uint64_t type, uint64_t id){
     return tag;
 }
 
+/* Add a tag of given type and id to a node; propagate upward until root */
 static inline int add_tag_to_node(tag_pool_t *tag_pool, node_pool_t *node_pool, \
         node_id_t root, node_id_t node, uint64_t type, uint64_t id){
     node_id_t on_node = node;
@@ -292,26 +303,36 @@ static inline int add_tag_to_node(tag_pool_t *tag_pool, node_pool_t *node_pool, 
     return 0;
 }
 
+/* Given a type bitmask, decide if the given tag is wanted */
 _composable uint64_t is_wanted_tag(tag_pool_t *pool, \
         tag_id_t tag, uint64_t type){
     return (type & resolve_tag(pool, tag) -> type);
 }
 
 
-/* Children */
+/* Children
+ *
+ * This is an AVL tree, to implement a dictionary of with ch as the key and
+ * node as the value. Since id is always aligned, we use the lower 2 bits of
+ * parent field to store the balance factor */
+
+/* Get the parent id of a child node */
 _composable child_id_t get_parent_id(child_pool_t *pool, child_id_t child){
     return ((~(_left_heavy | _right_heavy)) & \
             resolve_child(pool, child) -> parent);
 }
 
+/* Decide if the node is left heavy */
 _composable child_id_t is_left_heavy(child_pool_t *pool, child_id_t child){
     return (_left_heavy & resolve_child(pool, child) -> parent);
 }
 
+/* Decide if the node is right heavy */
 _composable child_id_t is_right_heavy(child_pool_t *pool, child_id_t child){
     return (_right_heavy & resolve_child(pool, child) -> parent);
 }
 
+/* Change the parent of the node preserving the balance factor */
 _composable void change_parent(child_pool_t *pool, \
         child_id_t child, child_id_t new_parent){
     resolve_child(pool, child) -> parent &= (_left_heavy | _right_heavy);
@@ -319,31 +340,38 @@ _composable void change_parent(child_pool_t *pool, \
     return;
 }
 
+/* Set a node as left heavy, assuming the node is originally balanced */
 _composable void set_left_heavy(child_pool_t *pool, child_id_t child){
     resolve_child(pool, child) -> parent |= _left_heavy;
     return;
 }
 
+/* Set a node as right heavy, assuming the node is originally balanced */
 _composable void set_right_heavy(child_pool_t *pool, child_id_t child){
     resolve_child(pool, child) -> parent |= _right_heavy;
     return;
 }
 
+/* Set a node as balanced */
 _composable void set_balanced(child_pool_t *pool, child_id_t child){
     resolve_child(pool, child) -> parent &= ~(_left_heavy | _right_heavy);
     return;
 }
 
+/* Decide if child is a left child of parent */
 _composable int is_left_child(child_pool_t *pool, \
         child_id_t child, child_id_t parent){
     return (resolve_child(pool, parent) -> lchild == child);
 }
 
+/* Decide if child is a right child of parent */
 _composable int is_right_child(child_pool_t *pool, \
         child_id_t child, child_id_t parent){
     return (resolve_child(pool, parent) -> rchild == child);
 }
 
+/* Update the child of parent from orig_child to new_child (i.e. replace
+ * orig_child with new_child) */
 _composable void avl_update_child(child_pool_t *pool, \
         child_id_t parent, child_id_t orig_child, child_id_t new_child){
     if (is_left_child(pool, orig_child, parent)){
@@ -356,6 +384,8 @@ _composable void avl_update_child(child_pool_t *pool, \
     return;
 }
 
+/* Decide if parent is root. If yes, update root. Otherwise update child as
+ * specified in avl_update_child() */
 _composable void avl_update_child_or_root(child_pool_t *pool, \
         child_id_t parent, child_root_t *root, \
         child_id_t orig_child, child_id_t new_child){
@@ -380,6 +410,7 @@ _composable void avl_update_child_or_root(child_pool_t *pool, \
         resolve_child(_pool, _to) -> _to_field = 0; \
     }
 
+/* Left rotate */
 static inline void avl_lrot(child_pool_t *pool, \
         child_id_t pivot, child_root_t *root){
     child_id_t orig_root = get_parent_id(pool, pivot);
@@ -395,6 +426,7 @@ static inline void avl_lrot(child_pool_t *pool, \
     return;
 }
 
+/* Right rotate */
 static inline void avl_rrot(child_pool_t *pool, \
         child_id_t pivot, child_root_t *root){
     child_id_t orig_root = get_parent_id(pool, pivot);
@@ -464,6 +496,7 @@ static inline void avl_rlrot(child_pool_t *pool, \
     return;
 }
 
+/* Find child (i.e. data) given ch (i.e. key) */
 static inline node_id_t find_child(child_pool_t *child_pool, \
         node_pool_t *node_pool, node_id_t node, char ch){
     child_id_t current_child = resolve_node(node_pool, node) -> children;
@@ -485,6 +518,8 @@ static inline node_id_t find_child(child_pool_t *child_pool, \
     return 0;
 }
 
+/* Change the child at ch to new_child, assuming that a child is already present
+ * at ch */
 static inline void change_child(child_pool_t *child_pool, \
         node_pool_t *node_pool, node_id_t node, char ch, node_id_t new_child){
     child_id_t current_child = resolve_node(node_pool, node) -> children;
@@ -504,6 +539,7 @@ static inline void change_child(child_pool_t *child_pool, \
     }
 }
 
+/* Add a child child under key ch, assuming that there is no child under ch */
 static inline int add_child(child_pool_t *child_pool, \
         node_pool_t *node_pool, node_id_t node, char ch, node_id_t child){
     child_id_t new_child = alloc_child(child_pool);
@@ -616,53 +652,65 @@ static inline node_id_t create_node(node_pool_t *pool, \
     return node;
 }
 
+/* Calculate the edge length of the edge attached to the node */
 _composable uint64_t len_edge(node_pool_t *pool, node_id_t node){
     return (resolve_node(pool, node) -> end_idx + 1 - \
             resolve_node(pool, node) -> start_idx);
 }
 
+/* Decide if the node is a leaf */
 _composable int is_leaf_node(node_pool_t *pool, node_id_t node){
     return !(resolve_node(pool, node) -> children);
 }
 
 
 /* Suffix tree */
+/* Get the string pool of the tree */
 _composable str_pool_t *sp_of(tree_t *tree){
     return &((tree -> pools).str_pool);
 }
 
+/* Get the tag pool of the tree */
 _composable tag_pool_t *tp_of(tree_t *tree){
    return &((tree -> pools).tag_pool);
 }
 
+/* Get the child pool of the tree */
 _composable child_pool_t *cp_of(tree_t *tree){
     return &((tree -> pools).child_pool);
 }
 
+/* Get the node pool of the tree */
 _composable node_pool_t *np_of(tree_t *tree){
     return &((tree -> pools).node_pool);
 }
 
+/* Get the active point of the tree */
 _composable active_point_t *ap_of(tree_t *tree){
     return &(tree -> active_point);
 }
 
+/* Get the active node of the tree */
 _composable node_id_t an_of(tree_t *tree){
     return ap_of(tree) -> node;
 }
 
+/* Get the active length of the tree */
 _composable uint64_t al_of(tree_t *tree){
     return ap_of(tree) -> len;
 }
 
+/* Get the active edge of the tree */
 _composable str_idx_t ae_of(tree_t *tree){
     return ap_of(tree) -> edge;
 }
 
+/* Get the active edge, in char, of the tree */
 _composable char ac_of(tree_t *tree){
     return ap_of(tree) -> ch;
 }
 
+/* Wrappers around various functions */
 _composable str_idx_t t_add_string(tree_t *tree, char *src, uint64_t len){
     return add_string(sp_of(tree), src, len);
 }
@@ -729,6 +777,7 @@ _composable int t_is_leaf_node(tree_t *tree, node_id_t node){
     return is_leaf_node(np_of(tree), node);
 }
 
+/* Update suffix link if needed (i.e. last_node is present) */
 _composable void maybe_update_link(tree_t *tree, node_id_t target){
     if (tree -> last_node){
         t_resolve_node(tree, tree -> last_node) -> link = target;
@@ -737,6 +786,7 @@ _composable void maybe_update_link(tree_t *tree, node_id_t target){
     return;
 }
 
+/* Walkdown the tree */
 _composable int walkdown(tree_t *tree, node_id_t node){
     if ((t_is_leaf_node(tree, node)) && \
             (t_len_edge(tree, node) <= al_of(tree))){
@@ -751,6 +801,7 @@ _composable int walkdown(tree_t *tree, node_id_t node){
     return 0;
 }
 
+/* Split an edge */
 static inline node_id_t split_edge(tree_t *tree, \
         node_id_t orig_node, uint64_t split_len, char split_next_ch, \
         node_id_t parent_node, char parent_ch){
@@ -759,9 +810,11 @@ static inline node_id_t split_edge(tree_t *tree, \
     node_id_t split_node;
 
     if (split_idx == t_resolve_node(tree, orig_node) -> end_idx){
+        /* Imaginary split of former leaf node */
         split_node = orig_node;
     }
     else{
+        /* Real split */
         split_node = t_create_node(tree, parent_node, \
                 t_resolve_node(tree, orig_node) -> start_idx, split_idx);
         _err_if(!split_node, 0);
@@ -804,6 +857,7 @@ static inline node_id_t split_edge(tree_t *tree, \
     return split_node;
 }
 
+/* Add a new char to the tree */
 static inline int add_char_to_tree(tree_t *tree, str_idx_t idx, char ch, \
         str_idx_t tail_idx, uint64_t type, uint64_t id){
     (tree -> implicit_suffix)++;
@@ -880,6 +934,7 @@ static inline int add_char_to_tree(tree_t *tree, str_idx_t idx, char ch, \
     return 0;
 }
 
+/* Add a new string to the tree */
 int add_string_to_tree(tree_t *tree, str_idx_t start_idx, str_idx_t end_idx, \
         uint64_t type, uint64_t id){
     while (start_idx <= end_idx){
@@ -929,6 +984,7 @@ int add_string_to_tree(tree_t *tree, str_idx_t start_idx, str_idx_t end_idx, \
     return 0;
 }
 
+/* Find exact matches of pattern in the tree */
 tag_list_head_t basic_search(tree_t *tree, char *pattern, uint64_t size){
     node_id_t current_node = tree -> root;
     char *current_char = pattern;
@@ -953,6 +1009,7 @@ tag_list_head_t basic_search(tree_t *tree, char *pattern, uint64_t size){
     return t_resolve_node(tree, current_node) -> tags;
 }
 
+/* Open all pools */
 _composable int open_all_pools(tree_t *tree, \
         char *str_path, char *tag_path, char *child_path, char *node_path){
     if (_unlikely(pool_open(sp_of(tree), str_path) == -1)){
@@ -976,6 +1033,7 @@ _composable int open_all_pools(tree_t *tree, \
     return 0;
 }
 
+/* Sync all pools with backend files */
 _composable void sync_all_pools(tree_t *tree){
     pool_sync(sp_of(tree));
     pool_sync(tp_of(tree));
@@ -985,6 +1043,7 @@ _composable void sync_all_pools(tree_t *tree){
     return;
 }
 
+/* Close all pools */
 _composable void close_all_pools(tree_t *tree){
     pool_close(sp_of(tree));
     pool_close(tp_of(tree));
@@ -994,6 +1053,7 @@ _composable void close_all_pools(tree_t *tree){
     return;
 }
 
+/* Create a blank suffix tree */
 int create_tree(char *str_path, char *tag_path, \
         char *child_path, char *node_path){
     _err_if(pool_create(str_path) == -1, -1);
@@ -1011,6 +1071,7 @@ int create_tree(char *str_path, char *tag_path, \
     return 0;
 }
 
+/* Open a suffix tree */
 int open_tree(tree_t *tree, \
         char *str_path, char *tag_path, char *child_path, char *node_path){
     _err_if(open_all_pools(tree, \
@@ -1027,11 +1088,13 @@ int open_tree(tree_t *tree, \
     return 0;
 }
 
+/* Sync the suffix tree with backend files */
 void sync_tree(tree_t *tree){
     sync_all_pools(tree);
     return;
 }
 
+/* Close the suffix tree */
 void close_tree(tree_t *tree){
     close_all_pools(tree);
     return;
