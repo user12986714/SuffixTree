@@ -163,6 +163,9 @@ typedef child_id_t child_root_t;
 
 typedef uint64_t node_id_t;
 
+#define _start_of_string (0xFF)
+#define _end_of_string (0xFE)
+
 /* Tags */
 typedef pool_t tag_pool_t;
 typedef struct tag_s{
@@ -228,12 +231,14 @@ typedef struct tree_s{
 /* Add a new string to the string pool (i.e. append it to the giant string */
 static inline str_idx_t add_string(str_pool_t *pool, char *src, uint64_t len){
     uint64_t used_size = *((uint64_t *)(pool -> addr));
-    uint64_t new_used_size = used_size + len;
+    uint64_t new_used_size = used_size + len + 2; /* Start and end of string */
     _err_if(new_used_size < used_size, -1);  /* Overflow */
 
     _err_if(pool_maybe_expand(pool, new_used_size) == -1, -1);
 
-    memcpy(pool -> addr + used_size, src, len);
+    *((char *)(pool -> addr + used_size)) = _start_of_string;
+    memcpy(pool -> addr + used_size + 1, src, len);
+    *((char *)(pool -> addr + new_used_size - 1)) = _end_of_string;
     *((uint64_t *)(pool -> addr)) = new_used_size;
     return used_size;
 }
