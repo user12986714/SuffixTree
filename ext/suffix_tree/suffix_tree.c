@@ -52,7 +52,7 @@
 #define _mmap_flags (MAP_SHARED)
 #define _mmap_prot (PROT_READ | PROT_WRITE)
 
-#define _align (24)  /* 16 MiB */
+#define _align (28)  /* 256 MiB */
 #define _calc_align(x) (((((x) - 1) >> _align) + 1) << _align)
 
 typedef struct pool_s{
