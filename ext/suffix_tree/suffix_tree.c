@@ -828,7 +828,7 @@ _composable void maybe_update_link(tree_t *tree, node_id_t target){
 
 /* Walkdown the tree */
 _composable int walkdown(tree_t *tree, node_id_t node){
-    if ((t_is_leaf_node(tree, node)) && \
+    if ((!t_is_leaf_node(tree, node)) && \
             (t_len_edge(tree, node) <= al_of(tree))){
         ap_of(tree) -> len -= t_len_edge(tree, node);
         ap_of(tree) -> edge += t_len_edge(tree, node);

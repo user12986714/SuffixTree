@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name = "suffix_tree"
-  s.version = "0.0.0"
+  s.version = "0.2.1"
   s.date = "2020-08-16"
   s.summary = "A terribly implemented suffix tree gem for Ruby"
   s.authors = %w[user12986714]
