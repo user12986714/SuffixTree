@@ -275,64 +275,28 @@ static inline tag_id_t create_tag(tag_pool_t *pool, uint64_t type, uint64_t id){
 /* Add a tag of given type and id to a node; propagate upward until root */
 static inline int add_tag_to_node(tag_pool_t *tag_pool, node_pool_t *node_pool, \
         node_id_t root, node_id_t node, uint64_t type, uint64_t id){
-    node_id_t on_node = node;
-    while (on_node != root){
-        tag_id_t current_tag = resolve_node(node_pool, on_node) -> tags;
-        tag_id_t previous_tag = 0;
+    tag_id_t current_tag = resolve_node(node_pool, node) -> tags;
+    tag_id_t previous_tag = 0;
 
-        while (_unlikely(current_tag && \
-                    (resolve_tag(tag_pool, current_tag) -> id > id))){
-            previous_tag = current_tag;
-            current_tag = resolve_tag(tag_pool, current_tag) -> next;
-        }
-
-        if (current_tag && (id == resolve_tag(tag_pool, current_tag) -> id)){
-            resolve_tag(tag_pool, current_tag) -> type |= type;
-        }
-        else{
-            tag_id_t new_tag = create_tag(tag_pool, type, id);
-            _err_if(!new_tag, -1);
-            resolve_tag(tag_pool, new_tag) -> next = current_tag;
-
-            if (_unlikely(previous_tag)){
-                resolve_tag(tag_pool, previous_tag) -> next = new_tag;
-            }
-            else{
-                resolve_node(node_pool, on_node) -> tags = new_tag;
-            }
-        }
-
-        on_node = resolve_node(node_pool, on_node) -> parent;
+    while (_unlikely(current_tag && \
+                (resolve_tag(tag_pool, current_tag) -> id > id))){
+        previous_tag = current_tag;
+        current_tag = resolve_tag(tag_pool, current_tag) -> next;
     }
 
-    return 0;
-}
-
-/* Copy all tags of src to dest, assuming dest has no tags previously */
-_composable int copy_tags(tag_pool_t *tag_pool, node_pool_t *node_pool, \
-        node_id_t dest, node_id_t src){
-    if (_likely(resolve_node(node_pool, src) -> tags)){
-        tag_id_t current_tag = resolve_node(node_pool, src) -> tags;
-        uint64_t id = resolve_tag(tag_pool, current_tag) -> id;
-        uint64_t type = resolve_tag(tag_pool, current_tag) -> type;
-
+    if (current_tag && (id == resolve_tag(tag_pool, current_tag) -> id)){
+        resolve_tag(tag_pool, current_tag) -> type |= type;
+    }
+    else{
         tag_id_t new_tag = create_tag(tag_pool, type, id);
         _err_if(!new_tag, -1);
+        resolve_tag(tag_pool, new_tag) -> next = current_tag;
 
-        resolve_node(node_pool, dest) -> tags = new_tag;
-
-        tag_id_t previous_tag = new_tag;
-        current_tag = resolve_tag(tag_pool, current_tag) -> next;
-        while (current_tag){
-            id = resolve_tag(tag_pool, current_tag) -> id;
-            type = resolve_tag(tag_pool, current_tag) -> type;
-
-            new_tag = create_tag(tag_pool, type, id);
-            _err_if(!new_tag, -1);
-
+        if (_unlikely(previous_tag)){
             resolve_tag(tag_pool, previous_tag) -> next = new_tag;
-            previous_tag = new_tag;
-            current_tag = resolve_tag(tag_pool, current_tag) -> next;
+        }
+        else{
+            resolve_node(node_pool, node) -> tags = new_tag;
         }
     }
 
@@ -786,10 +750,6 @@ _composable int t_add_tag_to_node(tree_t *tree, node_id_t node, \
             node, type, id);
 }
 
-_composable int t_copy_tags(tree_t *tree, node_id_t dest, node_id_t src){
-    return copy_tags(tp_of(tree), np_of(tree), dest, src);
-}
-
 _composable uint64_t t_is_wanted_tag(tree_t *tree, tag_id_t tag, uint64_t type){
     return is_wanted_tag(tp_of(tree), tag, type);
 }
@@ -858,8 +818,6 @@ static inline node_id_t split_edge(tree_t *tree, \
         split_node = t_create_node(tree, parent_node, \
                 t_resolve_node(tree, orig_node) -> start_idx, split_idx);
         _err_if(!split_node, 0);
-
-        _err_if(t_copy_tags(tree, split_node, orig_node) == -1, 0);
 
         t_change_child(tree, parent_node, parent_ch, split_node);
         t_resolve_node(tree, orig_node) -> parent = split_node;
@@ -1002,7 +960,7 @@ int add_string_to_tree(tree_t *tree, str_idx_t start_idx, str_idx_t end_idx, \
 }
 
 /* Find exact matches of pattern in the tree */
-tag_list_head_t basic_search(tree_t *tree, char *pattern, uint64_t size){
+node_id_t basic_search(tree_t *tree, char *pattern, uint64_t size){
     node_id_t current_node = tree -> root;
     char *current_char = pattern;
 
@@ -1023,8 +981,34 @@ tag_list_head_t basic_search(tree_t *tree, char *pattern, uint64_t size){
         }
     }
 
-    return t_resolve_node(tree, current_node) -> tags;
+    return current_node;
 }
+
+
+void traverse_tree(tree_t *tree, node_id_t node, VALUE arr, uint64_t mask);
+
+void traverse_avl_tree(tree_t *tree, child_root_t child, VALUE arr, uint64_t mask){
+    if (!child){
+        return;
+    }
+    traverse_tree(tree, t_resolve_child(tree, child) -> node, arr, mask);
+    traverse_avl_tree(tree, t_resolve_child(tree, child) -> lchild, arr, mask);
+    traverse_avl_tree(tree, t_resolve_child(tree, child) -> rchild, arr, mask);
+    return;
+}
+
+void traverse_tree(tree_t *tree, node_id_t node, VALUE arr, uint64_t mask){
+    tag_list_head_t tags = t_resolve_node(tree, node) -> tags;
+    while (tags){
+        if (t_is_wanted_tag(tree, tags, mask)){
+            rb_ary_push(arr, ULL2NUM(t_resolve_tag(tree, tags) -> id));
+        }
+        tags = t_resolve_tag(tree, tags) -> next;
+    }
+    traverse_avl_tree(tree, t_resolve_node(tree, node) -> children, arr, mask);
+    return;
+}
+
 
 /* Open all pools */
 _composable int open_all_pools(tree_t *tree, \
@@ -1374,13 +1358,7 @@ VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
 
     uint64_t type_mask = NUM2ULL(type);
     VALUE result_arr = rb_ary_new();
-    while (result){
-        if (t_is_wanted_tag(&(data -> tree), result, type_mask)){
-            rb_ary_push(result_arr, \
-                    ULL2NUM(t_resolve_tag(&(data -> tree), result) -> id));
-        }
-        result = t_resolve_tag(&(data -> tree), result) -> next;
-    }
+    traverse_tree(&(data -> tree), result, result_arr, type_mask);
 
     rb_thread_call_without_gvl(&release_rdlock, data, NULL, NULL);
     return result_arr;
