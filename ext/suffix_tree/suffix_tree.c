@@ -226,6 +226,23 @@ typedef struct tree_s{
     uint64_t implicit_suffix;
 } tree_t;
 
+/* Set */
+typedef struct set_node_s{
+    char bf;
+    uint64_t data;
+    struct set_node_s *lchild;
+    struct set_node_s *rchild;
+} set_node_t;
+typedef set_node_t set_t;
+
+typedef struct rec_state_s{
+    set_node_t *node;
+    char stage;
+} rec_state_t;
+#define _newly_visit (0)
+#define _visit_left (1)
+#define _visit_right (2)
+
 
 /* String */
 /* Add a new string to the string pool (i.e. append it to the giant string */
@@ -985,27 +1002,311 @@ node_id_t basic_search(tree_t *tree, char *pattern, uint64_t size){
 }
 
 
-void traverse_tree(tree_t *tree, node_id_t node, VALUE arr, uint64_t mask);
+/* Set */
+set_node_t *new_set_node(uint64_t data){
+    set_node_t *node = malloc(sizeof(set_node_t));
+    _err_if(!node, NULL);
 
-void traverse_avl_tree(tree_t *tree, child_root_t child, VALUE arr, uint64_t mask){
-    if (!child){
-        return;
+    node -> bf = 0;
+    node -> data = data;
+    node -> lchild = NULL;
+    node -> rchild = NULL;
+
+    return node;
+}
+
+_composable void set_update_parent_or_root(set_t **set, set_node_t *parent, \
+        set_node_t *orig_child, set_node_t *new_child){
+    if (parent){
+        if (parent -> lchild == orig_child){
+            parent -> lchild = new_child;
+        }
+        else{
+            parent -> rchild = new_child;
+        }
     }
-    traverse_tree(tree, t_resolve_child(tree, child) -> node, arr, mask);
-    traverse_avl_tree(tree, t_resolve_child(tree, child) -> lchild, arr, mask);
-    traverse_avl_tree(tree, t_resolve_child(tree, child) -> rchild, arr, mask);
+    else{
+        *set = new_child;
+    }
+
     return;
 }
 
-void traverse_tree(tree_t *tree, node_id_t node, VALUE arr, uint64_t mask){
+int set_insert(set_t **set, uint64_t data){
+    set_node_t *node = *set;
+    set_node_t *new_node;
+    if (_unlikely(!node)){
+        new_node = new_set_node(data);
+        _err_if(!new_node, -1);
+        *set = new_node;
+        return 0;
+    }
+
+    set_node_t *stack[96];  /* Enough stack for all uint64_t */
+    int stack_ptr = 0;
+    while (1){
+        stack[stack_ptr++] = node;
+        if (data == node -> data){
+            return 0;
+        }
+
+        if (data < node -> data){
+            if (node -> lchild){
+                node = node -> lchild;
+            }
+            else{
+                new_node = new_set_node(data);
+                _err_if(!new_node, -1);
+                node -> lchild = new_node;
+                break;
+            }
+        }
+        else{
+            if (node -> rchild){
+                node = node -> rchild;
+            }
+            else{
+                new_node = new_set_node(data);
+                _err_if(!new_node, -1);
+                node -> rchild = new_node;
+                break;
+            }
+        }
+    }
+
+    stack_ptr--;
+    set_node_t *parent = node;
+    set_node_t *hyper_parent;
+    node = new_node;
+    while (parent){
+        if (stack_ptr){
+            hyper_parent = stack[--stack_ptr];
+        }
+        else{
+            hyper_parent = NULL;
+        }
+
+        if (parent -> lchild == node){
+            if (parent -> bf == _left_heavy){
+                if (node -> bf == _right_heavy){
+                    /* Left-right rotate */
+                    set_node_t *rchild = node -> rchild;
+                    node -> rchild = rchild -> lchild;
+                    parent -> lchild = rchild -> rchild;
+
+                    rchild -> lchild = node;
+                    rchild -> rchild = parent;
+
+                    if (rchild -> bf == _left_heavy){
+                        node -> bf = 0;
+                        parent -> bf = _right_heavy;
+                    }
+                    else if (rchild -> bf == _right_heavy){
+                        node -> bf = _left_heavy;
+                        parent -> bf = 0;
+                    }
+                    rchild -> bf = 0;
+
+                    set_update_parent_or_root(set, hyper_parent, \
+                            parent, rchild);
+                }
+                else{
+                    /* Right rotate */
+                    parent -> lchild = node -> rchild;
+                    node -> rchild = parent;
+
+                    parent -> bf = 0;
+                    node -> bf = 0;
+
+                    set_update_parent_or_root(set, hyper_parent, \
+                            parent, node);
+                }
+
+                break;
+            }
+            else if (parent -> bf == _right_heavy){
+                parent -> bf = 0;
+                break;
+            }
+            else{
+                parent -> bf = _left_heavy;
+            }
+        }
+        else{
+            if (parent -> bf == _right_heavy){
+                if (node -> bf == _left_heavy){
+                    /* Right-left rotate */
+                    set_node_t *lchild = node -> lchild;
+                    node -> lchild = lchild -> rchild;
+                    parent -> rchild = lchild -> lchild;
+
+                    lchild -> rchild = node;
+                    lchild -> lchild = parent;
+
+                    if (lchild -> bf == _left_heavy){
+                        node -> bf = _right_heavy;
+                        parent -> bf = 0;
+                    }
+                    else if (lchild -> bf == _right_heavy){
+                        node -> bf = 0;
+                        parent -> bf = _left_heavy;
+                    }
+                    lchild -> bf = 0;
+
+                    set_update_parent_or_root(set, hyper_parent, \
+                            parent, lchild);
+                }
+                else{
+                    /* Left rotate */
+                    parent -> rchild = node -> lchild;
+                    node -> lchild = parent;
+
+                    parent -> bf = 0;
+                    node -> bf = 0;
+                    set_update_parent_or_root(set, hyper_parent, \
+                            parent, node);
+                }
+
+                break;
+            }
+            else if (parent -> bf == _left_heavy){
+                parent -> bf = 0;
+                break;
+            }
+            else{
+                parent -> bf = _right_heavy;
+            }
+        }
+
+        node = parent;
+        parent = hyper_parent;
+    }
+
+    return 0;
+}
+
+void set_destroy(set_t *set){
+    rec_state_t stack[96];
+    int stack_ptr = 0;
+
+    /* Simulate recusion */
+    set_node_t *node = set;
+    char stage = _newly_visit;
+set_destroy_rec:
+    switch (stage){
+        case _newly_visit:
+            if (_unlikely(!node)){
+                stage = _visit_right;
+                goto set_destroy_rec;
+            }
+            stack[stack_ptr].node = node;
+            stack[stack_ptr].stage = _visit_left;
+            stack_ptr++;
+
+            node = node -> lchild;
+            stage = _newly_visit;
+            goto set_destroy_rec;
+
+        case _visit_left:
+            stack[stack_ptr].node = node;
+            stack[stack_ptr].stage = _visit_right;
+            stack_ptr++;
+
+            node = node -> rchild;
+            stage = _newly_visit;
+            goto set_destroy_rec;
+
+        case _visit_right:
+            if (node){
+                free(node);
+            }
+            if (_unlikely(!stack_ptr)){
+                goto end_set_destroy_rec;
+            }
+
+            stack_ptr--;
+            node = stack[stack_ptr].node;
+            stage = stack[stack_ptr].stage;
+            goto set_destroy_rec;
+    }
+
+end_set_destroy_rec:
+    return;
+}
+
+void arr_from_set(set_t **set, VALUE arr){
+    rec_state_t stack[96];
+    int stack_ptr = 0;
+
+    /* Simulate recusion */
+    set_node_t *node = *set;
+    char stage = _newly_visit;
+set_destroy_rec:
+    switch (stage){
+        case _newly_visit:
+            if (_unlikely(!node)){
+                stage = _visit_right;
+                goto set_destroy_rec;
+            }
+            stack[stack_ptr].node = node;
+            stack[stack_ptr].stage = _visit_left;
+            stack_ptr++;
+
+            node = node -> lchild;
+            stage = _newly_visit;
+            goto set_destroy_rec;
+
+        case _visit_left:
+            rb_ary_push(arr, ULL2NUM(node -> data));
+            stack[stack_ptr].node = node;
+            stack[stack_ptr].stage = _visit_right;
+            stack_ptr++;
+
+            node = node -> rchild;
+            stage = _newly_visit;
+            goto set_destroy_rec;
+
+        case _visit_right:
+            if (node){
+                free(node);
+            }
+            if (_unlikely(!stack_ptr)){
+                goto end_set_destroy_rec;
+            }
+
+            stack_ptr--;
+            node = stack[stack_ptr].node;
+            stage = stack[stack_ptr].stage;
+            goto set_destroy_rec;
+    }
+
+end_set_destroy_rec:
+    return;
+}
+
+
+/* Tree traversal */
+void traverse_tree(tree_t *tree, node_id_t node, uint64_t mask, set_t **set);
+
+void traverse_avl_tree(tree_t *tree, child_root_t child, uint64_t mask, set_t **set){
+    if (!child){
+        return;
+    }
+    traverse_tree(tree, t_resolve_child(tree, child) -> node, mask, set);
+    traverse_avl_tree(tree, t_resolve_child(tree, child) -> lchild, mask, set);
+    traverse_avl_tree(tree, t_resolve_child(tree, child) -> rchild, mask, set);
+    return;
+}
+
+void traverse_tree(tree_t *tree, node_id_t node, uint64_t mask, set_t **set){
     tag_list_head_t tags = t_resolve_node(tree, node) -> tags;
     while (tags){
         if (t_is_wanted_tag(tree, tags, mask)){
-            rb_ary_push(arr, ULL2NUM(t_resolve_tag(tree, tags) -> id));
+            set_insert(set, t_resolve_tag(tree, tags) -> id);
         }
         tags = t_resolve_tag(tree, tags) -> next;
     }
-    traverse_avl_tree(tree, t_resolve_node(tree, node) -> children, arr, mask);
+    traverse_avl_tree(tree, t_resolve_node(tree, node) -> children, mask, set);
     return;
 }
 
@@ -1337,28 +1638,29 @@ VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
     uint64_t pattern_size = RSTRING_LEN(u8pattern);
     char *pattern_addr = malloc(pattern_size);
 
-    if (_likely(pattern_addr)){
-        memcpy(pattern_addr, StringValuePtr(u8pattern), pattern_size);
-        basic_search_args_t basic_search_args = {
-            .tree = &(data -> tree),
-            .pattern_addr = pattern_addr,
-            .pattern_size = pattern_size
-        };
+    if (_unlikely(!pattern_addr)){
+        rb_thread_call_without_gvl(release_rdlock, data, NULL, NULL);
+        rb_raise(rb_eRuntimeError, "Memory allocation failure");
+    }
 
-        rb_thread_call_without_gvl(&gvl_free_basic_search, \
-                &basic_search_args, NULL, NULL);
-        result = basic_search_args.result;
-        
-        free(pattern_addr);
-    }
-    else{
-        result = basic_search(&(data -> tree), \
-                StringValuePtr(u8pattern), pattern_size);
-    }
+    memcpy(pattern_addr, StringValuePtr(u8pattern), pattern_size);
+    basic_search_args_t basic_search_args = {
+        .tree = &(data -> tree),
+        .pattern_addr = pattern_addr,
+        .pattern_size = pattern_size
+    };
+
+    rb_thread_call_without_gvl(&gvl_free_basic_search, \
+            &basic_search_args, NULL, NULL);
+    result = basic_search_args.result;
+    free(pattern_addr);
 
     uint64_t type_mask = NUM2ULL(type);
+    set_t *result_set = NULL;
+    traverse_tree(&(data -> tree), result, type_mask, &result_set);
+
     VALUE result_arr = rb_ary_new();
-    traverse_tree(&(data -> tree), result, result_arr, type_mask);
+    arr_from_set(&result_set, result_arr);
 
     rb_thread_call_without_gvl(&release_rdlock, data, NULL, NULL);
     return result_arr;
