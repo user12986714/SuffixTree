@@ -33,10 +33,11 @@
 
 #ifdef DEBUG_BUILD
 #define _assert(x) if (_unlikely(!(x))){*(uint64_t *)(0) = 0xABADCAFE;}
+#define _unreachable() _assert(0)
 #define _composable
 #else
 #define _assert(x)
-
+#define _unreachable() __builtin_unreachable()
 /* Marking a function composable inlines the function on release builds.
  * Composable functions are cheap. It is encouraged to declare many composable
  * functions, each doing one thing and does it well. They make the code much
@@ -242,6 +243,15 @@ typedef struct rec_state_s{
 #define _newly_visit (0)
 #define _visit_left (1)
 #define _visit_right (2)
+
+/* Tree traversal */
+typedef struct stack_frame_s{
+    uint64_t node_or_child;
+    char stage;
+} stack_frame_t;
+#define _done_funcall (3)
+#define _first_visit (4)
+#define _second_visit (5)
 
 
 /* String */
@@ -1003,6 +1013,7 @@ node_id_t basic_search(tree_t *tree, char *pattern, uint64_t size){
 
 
 /* Set */
+/* Create new set node */
 set_node_t *new_set_node(uint64_t data){
     set_node_t *node = malloc(sizeof(set_node_t));
     _err_if(!node, NULL);
@@ -1015,7 +1026,8 @@ set_node_t *new_set_node(uint64_t data){
     return node;
 }
 
-_composable void set_update_parent_or_root(set_t **set, set_node_t *parent, \
+/* Similar to avl_update_child_or_root() */
+_composable void set_update_child_or_root(set_t **set, set_node_t *parent, \
         set_node_t *orig_child, set_node_t *new_child){
     if (parent){
         if (parent -> lchild == orig_child){
@@ -1032,6 +1044,7 @@ _composable void set_update_parent_or_root(set_t **set, set_node_t *parent, \
     return;
 }
 
+/* Insert a value into the set */
 int set_insert(set_t **set, uint64_t data){
     set_node_t *node = *set;
     set_node_t *new_node;
@@ -1107,7 +1120,7 @@ int set_insert(set_t **set, uint64_t data){
                     }
                     rchild -> bf = 0;
 
-                    set_update_parent_or_root(set, hyper_parent, \
+                    set_update_child_or_root(set, hyper_parent, \
                             parent, rchild);
                 }
                 else{
@@ -1118,7 +1131,7 @@ int set_insert(set_t **set, uint64_t data){
                     parent -> bf = 0;
                     node -> bf = 0;
 
-                    set_update_parent_or_root(set, hyper_parent, \
+                    set_update_child_or_root(set, hyper_parent, \
                             parent, node);
                 }
 
@@ -1153,7 +1166,7 @@ int set_insert(set_t **set, uint64_t data){
                     }
                     lchild -> bf = 0;
 
-                    set_update_parent_or_root(set, hyper_parent, \
+                    set_update_child_or_root(set, hyper_parent, \
                             parent, lchild);
                 }
                 else{
@@ -1163,7 +1176,7 @@ int set_insert(set_t **set, uint64_t data){
 
                     parent -> bf = 0;
                     node -> bf = 0;
-                    set_update_parent_or_root(set, hyper_parent, \
+                    set_update_child_or_root(set, hyper_parent, \
                             parent, node);
                 }
 
@@ -1185,6 +1198,7 @@ int set_insert(set_t **set, uint64_t data){
     return 0;
 }
 
+/* Destroy the set */
 void set_destroy(set_t *set){
     rec_state_t stack[96];
     int stack_ptr = 0;
@@ -1195,7 +1209,7 @@ void set_destroy(set_t *set){
 set_destroy_rec:
     switch (stage){
         case _newly_visit:
-            if (_unlikely(!node)){
+            if (!node){
                 stage = _visit_right;
                 goto set_destroy_rec;
             }
@@ -1229,11 +1243,13 @@ set_destroy_rec:
             stage = stack[stack_ptr].stage;
             goto set_destroy_rec;
     }
+    _unreachable();
 
 end_set_destroy_rec:
     return;
 }
 
+/* Construct ruby array from set and destroy the set */
 void arr_from_set(set_t **set, VALUE arr){
     rec_state_t stack[96];
     int stack_ptr = 0;
@@ -1244,7 +1260,7 @@ void arr_from_set(set_t **set, VALUE arr){
 set_destroy_rec:
     switch (stage){
         case _newly_visit:
-            if (_unlikely(!node)){
+            if (!node){
                 stage = _visit_right;
                 goto set_destroy_rec;
             }
@@ -1279,6 +1295,7 @@ set_destroy_rec:
             stage = stack[stack_ptr].stage;
             goto set_destroy_rec;
     }
+    _unreachable();
 
 end_set_destroy_rec:
     return;
@@ -1286,28 +1303,109 @@ end_set_destroy_rec:
 
 
 /* Tree traversal */
-void traverse_tree(tree_t *tree, node_id_t node, uint64_t mask, set_t **set);
+/* Push a stack frame to the stack */
+_composable int push_stack_frame(stack_frame_t **stack, \
+        uint64_t *stack_ptr, uint64_t *stack_size, \
+        uint64_t node_or_child, char stage){
+    (*stack)[*stack_ptr].node_or_child = node_or_child;
+    (*stack)[*stack_ptr].stage = stage;
 
-void traverse_avl_tree(tree_t *tree, child_root_t child, uint64_t mask, set_t **set){
-    if (!child){
-        return;
+    (*stack_ptr)++;
+    if (*stack_ptr == *stack_size){
+        (*stack_size) <<= 1;
+        stack_frame_t *new_stack = realloc((*stack), \
+                (*stack_size) * sizeof(stack_frame_t));
+        if (_unlikely(!new_stack)){
+            return -1;
+        }
+        (*stack) = new_stack;
     }
-    traverse_tree(tree, t_resolve_child(tree, child) -> node, mask, set);
-    traverse_avl_tree(tree, t_resolve_child(tree, child) -> lchild, mask, set);
-    traverse_avl_tree(tree, t_resolve_child(tree, child) -> rchild, mask, set);
-    return;
+
+    return 0;
 }
 
-void traverse_tree(tree_t *tree, node_id_t node, uint64_t mask, set_t **set){
-    tag_list_head_t tags = t_resolve_node(tree, node) -> tags;
-    while (tags){
-        if (t_is_wanted_tag(tree, tags, mask)){
-            set_insert(set, t_resolve_tag(tree, tags) -> id);
-        }
-        tags = t_resolve_tag(tree, tags) -> next;
+/* Traverse tree and add all tags to the set */
+int traverse_tree(tree_t *tree, node_id_t root, uint64_t mask, set_t **set){
+    stack_frame_t *stack = malloc(256 * sizeof(stack_frame_t));
+    uint64_t stack_ptr = 0;
+    uint64_t stack_size = 256;
+
+    tag_list_head_t tags;
+
+    uint64_t node_or_child = root;
+    char stage = _first_visit;
+traverse_tree_rec:
+    switch (stage){
+        case _first_visit:
+            tags = t_resolve_node(tree, node_or_child) -> tags;
+            while (tags){
+                if (t_is_wanted_tag(tree, tags, mask)){
+                    set_insert(set, t_resolve_tag(tree, tags) -> id);
+                }
+                tags = t_resolve_tag(tree, tags) -> next;
+            }
+
+            push_stack_frame(&stack, &stack_ptr, &stack_size, \
+                    node_or_child, _second_visit);
+            node_or_child = t_resolve_node(tree, node_or_child) -> children;
+            stage = _newly_visit;
+            goto traverse_child_rec;
+
+        case _second_visit:
+            if (_unlikely(!stack_ptr)){
+                goto end_traverse_tree;
+            }
+            stack_ptr--;
+            node_or_child = stack[stack_ptr].node_or_child;
+            stage = stack[stack_ptr].stage;
+            goto traverse_child_rec;
     }
-    traverse_avl_tree(tree, t_resolve_node(tree, node) -> children, mask, set);
-    return;
+    _unreachable();
+
+traverse_child_rec:
+    switch (stage){
+        case _newly_visit:
+            if (!node_or_child){
+                stage = _visit_right;
+                goto traverse_child_rec;
+            }
+            push_stack_frame(&stack, &stack_ptr, &stack_size, \
+                    node_or_child, _done_funcall);
+            node_or_child = t_resolve_child(tree, node_or_child) -> node;
+            stage = _first_visit;
+            goto traverse_tree_rec;
+
+        case _done_funcall:
+            push_stack_frame(&stack, &stack_ptr, &stack_size, \
+                    node_or_child, _visit_left);
+            node_or_child = t_resolve_child(tree, node_or_child) -> lchild;
+            stage = _newly_visit;
+            goto traverse_child_rec;
+
+        case _visit_left:
+            push_stack_frame(&stack, &stack_ptr, &stack_size, \
+                    node_or_child, _visit_right);
+            node_or_child = t_resolve_child(tree, node_or_child) -> rchild;
+            stage = _newly_visit;
+            goto traverse_child_rec;
+
+        case _visit_right:
+            _assert(stack_ptr);
+            stack_ptr--;
+            node_or_child = stack[stack_ptr].node_or_child;
+            stage = stack[stack_ptr].stage;
+            if (stage == _second_visit){
+                goto traverse_tree_rec;
+            }
+            else{
+                goto traverse_child_rec;
+            }
+    }
+    _unreachable();
+
+end_traverse_tree:
+    free(stack);
+    return 0;
 }
 
 
