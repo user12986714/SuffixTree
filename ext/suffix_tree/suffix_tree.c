@@ -1285,12 +1285,12 @@ end_set_destroy_rec:
 }
 
 /* Construct ruby array from set and destroy the set */
-void arr_from_set(set_t **set, VALUE arr){
+void arr_from_set(set_t *set, VALUE arr){
     rec_state_t stack[96];
     int stack_ptr = 0;
 
     /* Simulate recusion */
-    set_node_t *node = *set;
+    set_node_t *node = set;
     char stage = _newly_visit;
 set_destroy_rec:
     switch (stage){
@@ -1350,13 +1350,14 @@ _composable int push_stack_frame(stack_frame_t **stack, \
         (*stack_size) <<= 1;
         stack_frame_t *new_stack = realloc((*stack), \
                 (*stack_size) * sizeof(stack_frame_t));
-        if (_unlikely(!new_stack)){
-            return -1;
-        }
+        _err_if(!new_stack);
         (*stack) = new_stack;
     }
 
     return 0;
+
+error_handling:
+    return -1;
 }
 
 /* Traverse tree and add all tags to the set */
@@ -1375,13 +1376,14 @@ traverse_tree_rec:
             tags = t_resolve_node(tree, node_or_child) -> tags;
             while (tags){
                 if (t_is_wanted_tag(tree, tags, mask)){
-                    set_insert(set, t_resolve_tag(tree, tags) -> id);
+                    _err_if(set_insert(set, \
+                                t_resolve_tag(tree, tags) -> id) == -1);
                 }
                 tags = t_resolve_tag(tree, tags) -> next;
             }
 
-            push_stack_frame(&stack, &stack_ptr, &stack_size, \
-                    node_or_child, _second_visit);
+            _err_if(push_stack_frame(&stack, &stack_ptr, &stack_size, \
+                    node_or_child, _second_visit) == -1);
             node_or_child = t_resolve_node(tree, node_or_child) -> children;
             stage = _newly_visit;
             goto traverse_child_rec;
@@ -1404,22 +1406,22 @@ traverse_child_rec:
                 stage = _visit_right;
                 goto traverse_child_rec;
             }
-            push_stack_frame(&stack, &stack_ptr, &stack_size, \
-                    node_or_child, _done_funcall);
+            _err_if(push_stack_frame(&stack, &stack_ptr, &stack_size, \
+                    node_or_child, _done_funcall) == -1);
             node_or_child = t_resolve_child(tree, node_or_child) -> node;
             stage = _first_visit;
             goto traverse_tree_rec;
 
         case _done_funcall:
-            push_stack_frame(&stack, &stack_ptr, &stack_size, \
-                    node_or_child, _visit_left);
+            _err_if(push_stack_frame(&stack, &stack_ptr, &stack_size, \
+                    node_or_child, _visit_left) == -1);
             node_or_child = t_resolve_child(tree, node_or_child) -> lchild;
             stage = _newly_visit;
             goto traverse_child_rec;
 
         case _visit_left:
-            push_stack_frame(&stack, &stack_ptr, &stack_size, \
-                    node_or_child, _visit_right);
+            _err_if(push_stack_frame(&stack, &stack_ptr, &stack_size, \
+                    node_or_child, _visit_right) == -1);
             node_or_child = t_resolve_child(tree, node_or_child) -> rchild;
             stage = _newly_visit;
             goto traverse_child_rec;
@@ -1441,6 +1443,10 @@ traverse_child_rec:
 end_traverse_tree:
     free(stack);
     return 0;
+
+error_handling:
+    free(stack);
+    return -1;
 }
 
 
@@ -1708,12 +1714,13 @@ typedef struct{
 
 void *gvl_free_insert_string(void *args){
     insert_string_args_t *typed_args = args;
-    if (_unlikely(add_string_to_tree(typed_args -> tree, \
-                    typed_args -> start_idx, typed_args -> end_idx, \
-                    typed_args -> type, typed_args -> id) == -1)){
-        return (void *)(0xABADCAFE);
-    }
+    _err_if(add_string_to_tree(typed_args -> tree, \
+                typed_args -> start_idx, typed_args -> end_idx, \
+                typed_args -> type, typed_args -> id) == -1);
     return NULL;
+
+error_handling:
+    return (void *)(0xABADCAFE);
 }
 
 void *gvl_free_basic_search(void *args){
@@ -1721,9 +1728,14 @@ void *gvl_free_basic_search(void *args){
     set_t *set = NULL;
     node_id_t result = basic_search(typed_args -> tree, \
             typed_args -> pattern_addr, typed_args -> pattern_size);
-    traverse_tree(typed_args -> tree, result, typed_args -> mask, &set);
+    _err_if(traverse_tree(typed_args -> tree, \
+                result, typed_args -> mask, &set) == -1);
     typed_args -> result = set;
     return NULL;
+
+error_handling:
+    set_destroy(set);
+    return (void *)(0xABADCAFE);
 }
 
 VALUE suffix_tree_sync(VALUE self){
@@ -1793,16 +1805,19 @@ VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
         .mask = NUM2ULL(type)
     };
 
-    rb_thread_call_without_gvl(&gvl_free_basic_search, \
+    void *ret = rb_thread_call_without_gvl(&gvl_free_basic_search, \
             &basic_search_args, NULL, NULL);
 
     free(pattern_addr);
     rb_thread_call_without_gvl(&release_rdlock, data, NULL, NULL);
 
-    set_t *result_set = basic_search_args.result;
+    if (_unlikely(ret)){
+        rb_raise(rb_eRuntimeError, "Search failure");
+    }
 
     VALUE result_arr = rb_ary_new();
-    arr_from_set(&result_set, result_arr);
+    arr_from_set(basic_search_args.result, result_arr);
+
     return result_arr;
 }
 
