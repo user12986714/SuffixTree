@@ -27,8 +27,8 @@
 #define _likely(x) __builtin_expect(!!(x), 1)
 #define _unlikely(x) __builtin_expect(!!(x), 0)
 
-#define _err_if(x, _return_value) if (_unlikely(x)){ \
-    return _return_value; \
+#define _err_if(x) if (_unlikely(x)){ \
+    goto error_handling; \
 }
 
 #ifdef DEBUG_BUILD
@@ -65,27 +65,27 @@ typedef struct pool_s{
 /* Create a pool */
 static inline int pool_create(char *path){
     int fd = open(path, _create_flags, _create_mode);
-    _err_if(fd == -1, -1);
+    _err_if(fd == -1);
 
     uint64_t size = sizeof(uint64_t);
-    if (_unlikely(ftruncate(fd, _calc_align(size)) == -1)){
-        close(fd);
-        return -1;
-    }
-    if (_unlikely((lseek(fd, 0, SEEK_SET) == (off_t)(-1)) || \
-                (write(fd, &size, sizeof(uint64_t)) == -1))){
-        close(fd);
-        return -1;
-    }
+    _err_if(ftruncate(fd, _calc_align(size)) == -1);
+    _err_if(lseek(fd, 0, SEEK_SET) == (off_t)(-1));
+    _err_if(write(fd, &size, sizeof(uint64_t)) == -1);
 
     close(fd);
     return 0;
+
+error_handling:
+    if (fd != -1){
+        close(fd);
+    }
+    return -1;
 }
 
 /* Open a pool */
 static inline int pool_open(pool_t *pool, char *path){
     pool -> fd = open(path, _open_flags);
-    _err_if(pool -> fd == -1, -1);
+    _err_if(pool -> fd == -1);
 
     struct stat file_stat;
     fstat(pool -> fd, &file_stat);
@@ -93,12 +93,15 @@ static inline int pool_open(pool_t *pool, char *path){
 
     pool -> addr = mmap(NULL, pool -> size, \
             _mmap_prot, _mmap_flags, pool -> fd, 0);
-    if (_unlikely(pool -> addr == MAP_FAILED)){
-        close(pool -> fd);
-        return -1;
-    }
+    _err_if(pool -> addr == MAP_FAILED);
 
     return 0;
+
+error_handling:
+    if (pool -> fd != -1){
+        close(pool -> fd);
+    }
+    return -1;
 }
 
 /* Sync a pool with backend file */
@@ -114,17 +117,20 @@ _composable int pool_maybe_expand(pool_t *pool, uint64_t size){
         pool_sync(pool);
 
         uint64_t new_size = _calc_align(size);
-        _err_if(ftruncate(pool -> fd, new_size) == -1, -1);
+        _err_if(ftruncate(pool -> fd, new_size) == -1);
 
         char *new_addr = mremap(pool -> addr, pool -> size, \
                 new_size, MREMAP_MAYMOVE);
-        _err_if(new_addr == MAP_FAILED, -1);
+        _err_if(new_addr == MAP_FAILED);
 
         pool -> addr = new_addr;
         pool -> size = new_size;
     }
 
     return 0;
+
+error_handling:
+    return -1;
 }
 
 /* Close a pool */
@@ -140,10 +146,12 @@ static inline void pool_close(pool_t *pool){
     static inline _id_type _name (_pool_type *pool){ \
         uint64_t used_size = *((uint64_t *)(pool -> addr)); \
         uint64_t new_used_size = used_size + sizeof(_element_type); \
-        _err_if(new_used_size < used_size, 0); \
-        _err_if(pool_maybe_expand(pool, new_used_size) == -1, 0); \
+        _err_if(new_used_size < used_size); \
+        _err_if(pool_maybe_expand(pool, new_used_size) == -1); \
         *((uint64_t *)(pool -> addr)) = new_used_size; \
         return used_size; \
+    error_handling: \
+        return 0; \
     }
 
 #define _mk_resolve_func(_name, _pool_type, _element_type, _id_type) \
@@ -259,15 +267,18 @@ typedef struct stack_frame_s{
 static inline str_idx_t add_string(str_pool_t *pool, char *src, uint64_t len){
     uint64_t used_size = *((uint64_t *)(pool -> addr));
     uint64_t new_used_size = used_size + len + 2; /* Start and end of string */
-    _err_if(new_used_size < used_size, -1);  /* Overflow */
+    _err_if(new_used_size < used_size);  /* Overflow */
 
-    _err_if(pool_maybe_expand(pool, new_used_size) == -1, -1);
+    _err_if(pool_maybe_expand(pool, new_used_size) == -1);
 
     *((char *)(pool -> addr + used_size)) = _start_of_string;
     memcpy(pool -> addr + used_size + 1, src, len);
     *((char *)(pool -> addr + new_used_size - 1)) = _end_of_string;
     *((uint64_t *)(pool -> addr)) = new_used_size;
     return used_size;
+
+error_handling:
+    return -1;
 }
 
 /* Get the char at the given index */
@@ -290,13 +301,16 @@ _composable uint64_t str_size(str_pool_t *pool){
 /* Create a new tag with given type and id */
 static inline tag_id_t create_tag(tag_pool_t *pool, uint64_t type, uint64_t id){
     tag_id_t tag = alloc_tag(pool);
-    _err_if(!tag, 0);
+    _err_if(!tag);
 
     resolve_tag(pool, tag) -> id = id;
     resolve_tag(pool, tag) -> type = type;
     resolve_tag(pool, tag) -> next = 0;
 
     return tag;
+
+error_handling:
+    return 0;
 }
 
 /* Add a tag of given type and id to a node; propagate upward until root */
@@ -316,7 +330,7 @@ static inline int add_tag_to_node(tag_pool_t *tag_pool, node_pool_t *node_pool, 
     }
     else{
         tag_id_t new_tag = create_tag(tag_pool, type, id);
-        _err_if(!new_tag, -1);
+        _err_if(!new_tag);
         resolve_tag(tag_pool, new_tag) -> next = current_tag;
 
         if (_unlikely(previous_tag)){
@@ -328,6 +342,9 @@ static inline int add_tag_to_node(tag_pool_t *tag_pool, node_pool_t *node_pool, 
     }
 
     return 0;
+
+error_handling:
+    return -1;
 }
 
 /* Given a type bitmask, decide if the given tag is wanted */
@@ -570,7 +587,7 @@ static inline void change_child(child_pool_t *child_pool, \
 static inline int add_child(child_pool_t *child_pool, \
         node_pool_t *node_pool, node_id_t node, char ch, node_id_t child){
     child_id_t new_child = alloc_child(child_pool);
-    _err_if(!new_child, -1);
+    _err_if(!new_child);
 
     resolve_child(child_pool, new_child) -> ch = ch;
     resolve_child(child_pool, new_child) -> node = child;
@@ -659,6 +676,9 @@ static inline int add_child(child_pool_t *child_pool, \
     }
 
     return 0;
+
+error_handling:
+    return -1;
 }
 
 
@@ -667,7 +687,7 @@ static inline node_id_t create_node(node_pool_t *pool, \
         node_id_t root, node_id_t parent, \
         str_idx_t start_idx, str_idx_t end_idx){
     node_id_t node = alloc_node(pool);
-    _err_if(!node, 0);
+    _err_if(!node);
 
     resolve_node(pool, node) -> link = root;
     resolve_node(pool, node) -> parent = parent;
@@ -677,6 +697,9 @@ static inline node_id_t create_node(node_pool_t *pool, \
     resolve_node(pool, node) -> tags = 0;
 
     return node;
+
+error_handling:
+    return 0;
 }
 
 /* Calculate the edge length of the edge attached to the node */
@@ -844,19 +867,21 @@ static inline node_id_t split_edge(tree_t *tree, \
         /* Real split */
         split_node = t_create_node(tree, parent_node, \
                 t_resolve_node(tree, orig_node) -> start_idx, split_idx);
-        _err_if(!split_node, 0);
+        _err_if(!split_node);
 
         t_change_child(tree, parent_node, parent_ch, split_node);
         t_resolve_node(tree, orig_node) -> parent = split_node;
         t_resolve_node(tree, orig_node) -> start_idx = split_idx + 1;
-        _err_if(t_add_child(tree, \
-                    split_node, split_next_ch, orig_node) == -1, 0);
+        _err_if(t_add_child(tree, split_node, split_next_ch, orig_node) == -1);
     }
 
     maybe_update_link(tree, split_node);
     tree -> last_node = split_node;
 
     return split_node;
+
+error_handling:
+    return 0;
 }
 
 /* Add a new char to the tree */
@@ -878,13 +903,12 @@ static inline int add_char_to_tree(tree_t *tree, str_idx_t idx, char ch, \
 
             if (!next_node){
                 next_node = t_create_node(tree, an_of(tree), idx, tail_idx);
-                _err_if(!next_node, -1);
+                _err_if(!next_node);
 
                 maybe_update_link(tree, an_of(tree));
 
-                _err_if(t_add_child(tree, an_of(tree), \
-                            ch, next_node) == -1, -1);
-                _err_if(t_add_tag_to_node(tree, next_node, type, id) == -1, -1);
+                _err_if(t_add_child(tree, an_of(tree), ch, next_node) == -1);
+                _err_if(t_add_tag_to_node(tree, next_node, type, id) == -1);
             }
             else{
                 if (an_of(tree) != tree -> root){
@@ -910,13 +934,13 @@ static inline int add_char_to_tree(tree_t *tree, str_idx_t idx, char ch, \
             else{
                 node_id_t split_node = split_edge(tree, next_node, \
                         al_of(tree) - 1, next_ch, an_of(tree), ac_of(tree));
-                _err_if(!split_node, -1);
+                _err_if(!split_node);
 
                 node_id_t new_node = t_create_node(tree, \
                         split_node, idx, tail_idx);
-                _err_if(!new_node, -1);
-                _err_if(t_add_child(tree, split_node, ch, new_node) == -1, -1);
-                _err_if(t_add_tag_to_node(tree, new_node, type, id) == -1, -1);
+                _err_if(!new_node);
+                _err_if(t_add_child(tree, split_node, ch, new_node) == -1);
+                _err_if(t_add_tag_to_node(tree, new_node, type, id) == -1);
             }
         }
 
@@ -934,6 +958,9 @@ static inline int add_char_to_tree(tree_t *tree, str_idx_t idx, char ch, \
     }
 
     return 0;
+
+error_handling:
+    return -1;
 }
 
 /* Add a new string to the tree */
@@ -941,8 +968,7 @@ int add_string_to_tree(tree_t *tree, str_idx_t start_idx, str_idx_t end_idx, \
         uint64_t type, uint64_t id){
     while (start_idx <= end_idx){
         char ch = t_str_idx(tree, start_idx);
-        _err_if(add_char_to_tree(tree, \
-                    start_idx, ch, end_idx, type, id) == -1, -1);
+        _err_if(add_char_to_tree(tree, start_idx, ch, end_idx, type, id) == -1);
         start_idx++;
     }
 
@@ -954,7 +980,7 @@ int add_string_to_tree(tree_t *tree, str_idx_t start_idx, str_idx_t end_idx, \
 
         if(!al_of(tree)){
             maybe_update_link(tree, an_of(tree));
-            _err_if(t_add_tag_to_node(tree, an_of(tree), type, id) == -1, -1);
+            _err_if(t_add_tag_to_node(tree, an_of(tree), type, id) == -1);
         }
         else{
             _assert(next_node);
@@ -962,8 +988,8 @@ int add_string_to_tree(tree_t *tree, str_idx_t start_idx, str_idx_t end_idx, \
                     t_resolve_node(tree, next_node) -> start_idx + al_of(tree));
             node_id_t split_node = split_edge(tree, next_node, \
                     al_of(tree) - 1, next_ch, an_of(tree), ac_of(tree));
-            _err_if(!split_node, -1);
-            _err_if(t_add_tag_to_node(tree, split_node, type, id) == -1, -1);
+            _err_if(!split_node);
+            _err_if(t_add_tag_to_node(tree, split_node, type, id) == -1);
         }
 
         (tree -> implicit_suffix)--;
@@ -984,6 +1010,9 @@ int add_string_to_tree(tree_t *tree, str_idx_t start_idx, str_idx_t end_idx, \
     _assert(!al_of(tree));
 
     return 0;
+
+error_handling:
+    return -1;
 }
 
 /* Find exact matches of pattern in the tree */
@@ -1016,7 +1045,7 @@ node_id_t basic_search(tree_t *tree, char *pattern, uint64_t size){
 /* Create new set node */
 set_node_t *new_set_node(uint64_t data){
     set_node_t *node = malloc(sizeof(set_node_t));
-    _err_if(!node, NULL);
+    _err_if(!node);
 
     node -> bf = 0;
     node -> data = data;
@@ -1024,6 +1053,9 @@ set_node_t *new_set_node(uint64_t data){
     node -> rchild = NULL;
 
     return node;
+
+error_handling:
+    return NULL;
 }
 
 /* Similar to avl_update_child_or_root() */
@@ -1050,7 +1082,7 @@ int set_insert(set_t **set, uint64_t data){
     set_node_t *new_node;
     if (_unlikely(!node)){
         new_node = new_set_node(data);
-        _err_if(!new_node, -1);
+        _err_if(!new_node);
         *set = new_node;
         return 0;
     }
@@ -1069,7 +1101,7 @@ int set_insert(set_t **set, uint64_t data){
             }
             else{
                 new_node = new_set_node(data);
-                _err_if(!new_node, -1);
+                _err_if(!new_node);
                 node -> lchild = new_node;
                 break;
             }
@@ -1080,7 +1112,7 @@ int set_insert(set_t **set, uint64_t data){
             }
             else{
                 new_node = new_set_node(data);
-                _err_if(!new_node, -1);
+                _err_if(!new_node);
                 node -> rchild = new_node;
                 break;
             }
@@ -1196,6 +1228,9 @@ int set_insert(set_t **set, uint64_t data){
     }
 
     return 0;
+
+error_handling:
+    return -1;
 }
 
 /* Destroy the set */
@@ -1456,26 +1491,29 @@ _composable void close_all_pools(tree_t *tree){
 /* Create a blank suffix tree */
 int create_tree(char *str_path, char *tag_path, \
         char *child_path, char *node_path){
-    _err_if(pool_create(str_path) == -1, -1);
-    _err_if(pool_create(tag_path) == -1, -1);
-    _err_if(pool_create(child_path) == -1, -1);
-    _err_if(pool_create(node_path) == -1, -1);
+    _err_if(pool_create(str_path) == -1);
+    _err_if(pool_create(tag_path) == -1);
+    _err_if(pool_create(child_path) == -1);
+    _err_if(pool_create(node_path) == -1);
 
     tree_t tree;
     _err_if(open_all_pools(&tree, \
-                str_path, tag_path, child_path, node_path) == -1, -1);
+                str_path, tag_path, child_path, node_path) == -1);
     node_id_t root = create_node(np_of(&tree), 0, 0, 0, 0);
-    _err_if(root != sizeof(uint64_t), -1);
+    _err_if(root != sizeof(uint64_t));
 
     close_all_pools(&tree);
     return 0;
+
+error_handling:
+    return -1;
 }
 
 /* Open a suffix tree */
 int open_tree(tree_t *tree, \
         char *str_path, char *tag_path, char *child_path, char *node_path){
     _err_if(open_all_pools(tree, \
-                str_path, tag_path, child_path, node_path) == -1, -1);
+                str_path, tag_path, child_path, node_path) == -1);
     tree -> root = sizeof(uint64_t);
     tree -> last_node = 0;
     tree -> implicit_suffix = 0;
@@ -1486,6 +1524,9 @@ int open_tree(tree_t *tree, \
     ap_of(tree) -> ch = 0xFF;
 
     return 0;
+
+error_handling:
+    return -1;
 }
 
 /* Sync the suffix tree with backend files */
