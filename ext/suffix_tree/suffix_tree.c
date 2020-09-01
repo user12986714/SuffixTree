@@ -257,6 +257,7 @@ typedef struct stack_frame_s{
     uint64_t node_or_child;
     char stage;
 } stack_frame_t;
+#define _init_stack_size (256)
 #define _done_funcall (3)
 #define _first_visit (4)
 #define _second_visit (5)
@@ -314,8 +315,9 @@ error_handling:
 }
 
 /* Add a tag of given type and id to a node; propagate upward until root */
-static inline int add_tag_to_node(tag_pool_t *tag_pool, node_pool_t *node_pool, \
-        node_id_t root, node_id_t node, uint64_t type, uint64_t id){
+static inline int add_tag_to_node(tag_pool_t *tag_pool, \
+        node_pool_t *node_pool, node_id_t root, node_id_t node, \
+        uint64_t type, uint64_t id){
     tag_id_t current_tag = resolve_node(node_pool, node) -> tags;
     tag_id_t previous_tag = 0;
 
@@ -1362,9 +1364,9 @@ error_handling:
 
 /* Traverse tree and add all tags to the set */
 int traverse_tree(tree_t *tree, node_id_t root, uint64_t mask, set_t **set){
-    stack_frame_t *stack = malloc(256 * sizeof(stack_frame_t));
     uint64_t stack_ptr = 0;
-    uint64_t stack_size = 256;
+    uint64_t stack_size = _init_stack_size;
+    stack_frame_t *stack = malloc(stack_size * sizeof(stack_frame_t));
 
     tag_list_head_t tags;
 
@@ -1749,7 +1751,8 @@ VALUE suffix_tree_sync(VALUE self){
     return Qnil;
 }
 
-VALUE suffix_tree_insert_string(VALUE self, VALUE u8string, VALUE type, VALUE id){
+VALUE suffix_tree_insert_string(VALUE self, VALUE u8string, \
+        VALUE type, VALUE id){
     suffix_tree_t *data;
     TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
 
