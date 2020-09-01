@@ -1661,7 +1661,8 @@ typedef struct{
     tree_t *tree;
     char *pattern_addr;
     uint64_t pattern_size;
-    tag_list_head_t result;
+    uint64_t mask;
+    set_t *result;
 } basic_search_args_t;
 
 void *gvl_free_insert_string(void *args){
@@ -1676,8 +1677,11 @@ void *gvl_free_insert_string(void *args){
 
 void *gvl_free_basic_search(void *args){
     basic_search_args_t *typed_args = args;
-    typed_args -> result = basic_search(typed_args -> tree, \
+    set_t *set = NULL;
+    node_id_t result = basic_search(typed_args -> tree, \
             typed_args -> pattern_addr, typed_args -> pattern_size);
+    traverse_tree(typed_args -> tree, result, typed_args -> mask, &set);
+    typed_args -> result = set;
     return NULL;
 }
 
@@ -1732,7 +1736,6 @@ VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
 
     rb_thread_call_without_gvl(get_rdlock, data, NULL, NULL);
 
-    tag_list_head_t result;
     uint64_t pattern_size = RSTRING_LEN(u8pattern);
     char *pattern_addr = malloc(pattern_size);
 
@@ -1745,17 +1748,16 @@ VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
     basic_search_args_t basic_search_args = {
         .tree = &(data -> tree),
         .pattern_addr = pattern_addr,
-        .pattern_size = pattern_size
+        .pattern_size = pattern_size,
+        .mask = NUM2ULL(type)
     };
 
     rb_thread_call_without_gvl(&gvl_free_basic_search, \
             &basic_search_args, NULL, NULL);
-    result = basic_search_args.result;
+
     free(pattern_addr);
 
-    uint64_t type_mask = NUM2ULL(type);
-    set_t *result_set = NULL;
-    traverse_tree(&(data -> tree), result, type_mask, &result_set);
+    set_t *result_set = basic_search_args.result;
 
     VALUE result_arr = rb_ary_new();
     arr_from_set(&result_set, result_arr);
