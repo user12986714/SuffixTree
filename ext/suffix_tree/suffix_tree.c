@@ -1756,13 +1756,12 @@ VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
             &basic_search_args, NULL, NULL);
 
     free(pattern_addr);
+    rb_thread_call_without_gvl(&release_rdlock, data, NULL, NULL);
 
     set_t *result_set = basic_search_args.result;
 
     VALUE result_arr = rb_ary_new();
     arr_from_set(&result_set, result_arr);
-
-    rb_thread_call_without_gvl(&release_rdlock, data, NULL, NULL);
     return result_arr;
 }
 
