@@ -255,6 +255,7 @@ typedef struct rec_state_s{
 /* Tree traversal */
 typedef struct stack_frame_s{
     uint64_t node_or_child;
+    uint64_t idx;
     char stage;
 } stack_frame_t;
 #define _init_stack_size (256)
@@ -1343,8 +1344,9 @@ end_set_destroy_rec:
 /* Push a stack frame to the stack */
 _composable int push_stack_frame(stack_frame_t **stack, \
         uint64_t *stack_ptr, uint64_t *stack_size, \
-        uint64_t node_or_child, char stage){
+        uint64_t idx, uint64_t node_or_child, char stage){
     (*stack)[*stack_ptr].node_or_child = node_or_child;
+    (*stack)[*stack_ptr].idx = idx;
     (*stack)[*stack_ptr].stage = stage;
 
     (*stack_ptr)++;
@@ -1363,18 +1365,54 @@ error_handling:
 }
 
 /* Traverse tree and add all tags to the set */
-int traverse_tree(tree_t *tree, node_id_t root, uint64_t mask, set_t **set){
+int traverse_tree(tree_t *tree, node_id_t root, char *pattern, uint64_t size, \
+        uint64_t mask, set_t **set){
+   /* Branch pruning:
+     *
+     * An ID attached to the suffix <A><B><A><C> is also attached to <A><C>.
+     * Hence, if we encounter <A> while traversing the tree, we prune that
+     * branch as all tags under it will be present elsewhere too.
+     *
+     * KMP algorithm is used to find <A> during the traversal */
+    uint64_t lps_idx = 0;
+    uint64_t lps[size];
+    _assert(size);
+    uint64_t idx = 1;
+    lps[0] = 0;
+    while (idx < size){
+        if (pattern[idx] == pattern[lps_idx]){
+            lps_idx++;
+            lps[idx] = lps_idx;
+        }
+        else if (lps_idx){
+            lps_idx = lps[lps_idx - 1];
+            continue;
+        }
+        else{
+            lps[lps_idx] = 0;
+        }
+        idx++;
+    }
+
     uint64_t stack_ptr = 0;
     uint64_t stack_size = _init_stack_size;
     stack_frame_t *stack = malloc(stack_size * sizeof(stack_frame_t));
+    _err_if(!stack);
 
     tag_list_head_t tags;
-
+    idx = 0;
     uint64_t node_or_child = root;
     char stage = _first_visit;
 traverse_tree_rec:
     switch (stage){
         case _first_visit:
+            if (_unlikely(idx == size)){
+                /* Prune */
+                stage = _second_visit;
+                goto traverse_tree_rec;
+            }
+
+            /* Copy tags */
             tags = t_resolve_node(tree, node_or_child) -> tags;
             while (tags){
                 if (t_is_wanted_tag(tree, tags, mask)){
@@ -1384,8 +1422,9 @@ traverse_tree_rec:
                 tags = t_resolve_tag(tree, tags) -> next;
             }
 
+            /* Traverse children */
             _err_if(push_stack_frame(&stack, &stack_ptr, &stack_size, \
-                    node_or_child, _second_visit) == -1);
+                    idx, node_or_child, _second_visit) == -1);
             node_or_child = t_resolve_node(tree, node_or_child) -> children;
             stage = _newly_visit;
             goto traverse_child_rec;
@@ -1396,6 +1435,7 @@ traverse_tree_rec:
             }
             stack_ptr--;
             node_or_child = stack[stack_ptr].node_or_child;
+            idx = stack[stack_ptr].idx;
             stage = stack[stack_ptr].stage;
             goto traverse_child_rec;
     }
@@ -1409,21 +1449,28 @@ traverse_child_rec:
                 goto traverse_child_rec;
             }
             _err_if(push_stack_frame(&stack, &stack_ptr, &stack_size, \
-                    node_or_child, _done_funcall) == -1);
+                    idx, node_or_child, _done_funcall) == -1);
+            while (idx){
+                if (t_resolve_child(tree, node_or_child) -> ch == pattern[idx]){
+                    idx++;
+                    break;
+                }
+                idx = lps[idx - 1];
+            }
             node_or_child = t_resolve_child(tree, node_or_child) -> node;
             stage = _first_visit;
             goto traverse_tree_rec;
 
         case _done_funcall:
             _err_if(push_stack_frame(&stack, &stack_ptr, &stack_size, \
-                    node_or_child, _visit_left) == -1);
+                    idx, node_or_child, _visit_left) == -1);
             node_or_child = t_resolve_child(tree, node_or_child) -> lchild;
             stage = _newly_visit;
             goto traverse_child_rec;
 
         case _visit_left:
             _err_if(push_stack_frame(&stack, &stack_ptr, &stack_size, \
-                    node_or_child, _visit_right) == -1);
+                    idx, node_or_child, _visit_right) == -1);
             node_or_child = t_resolve_child(tree, node_or_child) -> rchild;
             stage = _newly_visit;
             goto traverse_child_rec;
@@ -1432,6 +1479,7 @@ traverse_child_rec:
             _assert(stack_ptr);
             stack_ptr--;
             node_or_child = stack[stack_ptr].node_or_child;
+            idx = stack[stack_ptr].idx;
             stage = stack[stack_ptr].stage;
             if (stage == _second_visit){
                 goto traverse_tree_rec;
@@ -1728,10 +1776,12 @@ error_handling:
 void *gvl_free_basic_search(void *args){
     basic_search_args_t *typed_args = args;
     set_t *set = NULL;
+
     node_id_t result = basic_search(typed_args -> tree, \
             typed_args -> pattern_addr, typed_args -> pattern_size);
-    _err_if(traverse_tree(typed_args -> tree, \
-                result, typed_args -> mask, &set) == -1);
+    _err_if(traverse_tree(typed_args -> tree, result, \
+                typed_args -> pattern_addr, typed_args -> pattern_size, \
+                typed_args -> mask, &set) == -1);
     typed_args -> result = set;
     return NULL;
 
@@ -1790,13 +1840,13 @@ VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
     suffix_tree_t *data;
     TypedData_Get_Struct(self, suffix_tree_t, &suffix_tree_t_type, data);
 
-    rb_thread_call_without_gvl(get_rdlock, data, NULL, NULL);
-
     uint64_t pattern_size = RSTRING_LEN(u8pattern);
+    if (!pattern_size){
+        return Qnil;
+    }
     char *pattern_addr = malloc(pattern_size);
 
     if (_unlikely(!pattern_addr)){
-        rb_thread_call_without_gvl(release_rdlock, data, NULL, NULL);
         rb_raise(rb_eRuntimeError, "Memory allocation failure");
     }
 
@@ -1808,12 +1858,12 @@ VALUE suffix_tree_basic_search(VALUE self, VALUE u8pattern, VALUE type){
         .mask = NUM2ULL(type)
     };
 
+    rb_thread_call_without_gvl(&get_rdlock, data, NULL, NULL);
     void *ret = rb_thread_call_without_gvl(&gvl_free_basic_search, \
             &basic_search_args, NULL, NULL);
-
-    free(pattern_addr);
     rb_thread_call_without_gvl(&release_rdlock, data, NULL, NULL);
 
+    free(pattern_addr);
     if (_unlikely(ret)){
         rb_raise(rb_eRuntimeError, "Search failure");
     }
