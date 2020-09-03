@@ -1394,7 +1394,7 @@ int traverse_tree(tree_t *tree, node_id_t root, char *pattern, uint64_t size, \
         idx++;
     }
 
-    uint64_t stack_ptr = 0;
+    uint64_t stack_ptr = lps[size - 1];
     uint64_t stack_size = _init_stack_size;
     stack_frame_t *stack = malloc(stack_size * sizeof(stack_frame_t));
     _err_if(!stack);
@@ -1450,6 +1450,7 @@ traverse_child_rec:
             }
             _err_if(push_stack_frame(&stack, &stack_ptr, &stack_size, \
                     idx, node_or_child, _done_funcall) == -1);
+
             while (idx){
                 if (t_resolve_child(tree, node_or_child) -> ch == pattern[idx]){
                     idx++;
@@ -1457,6 +1458,7 @@ traverse_child_rec:
                 }
                 idx = lps[idx - 1];
             }
+
             node_or_child = t_resolve_child(tree, node_or_child) -> node;
             stage = _first_visit;
             goto traverse_tree_rec;
