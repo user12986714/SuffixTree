@@ -1153,6 +1153,10 @@ int set_insert(set_t **set, uint64_t data){
                         node -> bf = _left_heavy;
                         parent -> bf = 0;
                     }
+                    else{
+                        node -> bf = 0;
+                        parent -> bf = 0;
+                    }
                     rchild -> bf = 0;
 
                     set_update_child_or_root(set, hyper_parent, \
@@ -1198,6 +1202,10 @@ int set_insert(set_t **set, uint64_t data){
                     else if (lchild -> bf == _right_heavy){
                         node -> bf = 0;
                         parent -> bf = _left_heavy;
+                    }
+                    else{
+                        node -> bf = 0;
+                        parent -> bf = 0;
                     }
                     lchild -> bf = 0;
 
