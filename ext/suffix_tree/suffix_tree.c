@@ -1295,12 +1295,12 @@ void arr_from_set(set_t *set, VALUE arr){
     /* Simulate recusion */
     set_node_t *node = set;
     char stage = _newly_visit;
-set_destroy_rec:
+arr_from_set_rec:
     switch (stage){
         case _newly_visit:
             if (!node){
                 stage = _visit_right;
-                goto set_destroy_rec;
+                goto arr_from_set_rec;
             }
             stack[stack_ptr].node = node;
             stack[stack_ptr].stage = _visit_left;
@@ -1308,7 +1308,7 @@ set_destroy_rec:
 
             node = node -> lchild;
             stage = _newly_visit;
-            goto set_destroy_rec;
+            goto arr_from_set_rec;
 
         case _visit_left:
             rb_ary_push(arr, ULL2NUM(node -> data));
@@ -1318,24 +1318,24 @@ set_destroy_rec:
 
             node = node -> rchild;
             stage = _newly_visit;
-            goto set_destroy_rec;
+            goto arr_from_set_rec;
 
         case _visit_right:
             if (node){
                 free(node);
             }
             if (_unlikely(!stack_ptr)){
-                goto end_set_destroy_rec;
+                goto end_arr_from_set_rec;
             }
 
             stack_ptr--;
             node = stack[stack_ptr].node;
             stage = stack[stack_ptr].stage;
-            goto set_destroy_rec;
+            goto arr_from_set_rec;
     }
     _unreachable();
 
-end_set_destroy_rec:
+end_arr_from_set_rec:
     return;
 }
 
@@ -1367,6 +1367,11 @@ error_handling:
 /* Traverse tree and add all tags to the set */
 int traverse_tree(tree_t *tree, node_id_t root, char *pattern, uint64_t size, \
         uint64_t mask, set_t **set){
+    if (_unlikely(!root)){
+        /* Nothing to traverse */
+        return 0;
+    }
+
    /* Branch pruning:
      *
      * An ID attached to the suffix <A><B><A><C> is also attached to <A><C>.
@@ -1389,29 +1394,47 @@ int traverse_tree(tree_t *tree, node_id_t root, char *pattern, uint64_t size, \
             continue;
         }
         else{
-            lps[lps_idx] = 0;
+            lps[idx] = 0;
         }
         idx++;
     }
 
-    uint64_t stack_ptr = lps[size - 1];
+    uint64_t stack_ptr = 0;
     uint64_t stack_size = _init_stack_size;
     stack_frame_t *stack = malloc(stack_size * sizeof(stack_frame_t));
     _err_if(!stack);
 
     tag_list_head_t tags;
-    idx = 0;
+    idx = lps[size - 1];
     uint64_t node_or_child = root;
     char stage = _first_visit;
+    char this_ch;
+    uint64_t i;
+    goto skip_prune;
+
 traverse_tree_rec:
     switch (stage){
         case _first_visit:
-            if (_unlikely(idx == size)){
-                /* Prune */
+            for (i = t_resolve_node(tree, node_or_child) -> start_idx; \
+                    i <= t_resolve_node(tree, node_or_child) -> end_idx; \
+                    i++){
+                this_ch = t_str_idx(tree, i);
+                do{
+                    if (this_ch == pattern[idx]){
+                        idx++;
+                        break;
+                    }
+                    idx = idx ? lps[idx - 1] : idx;
+                } while (idx);
+                if (idx == size){
+                    break;
+                }
+            }
+            if (idx == size){
                 stage = _second_visit;
                 goto traverse_tree_rec;
             }
-
+skip_prune:
             /* Copy tags */
             tags = t_resolve_node(tree, node_or_child) -> tags;
             while (tags){
@@ -1450,15 +1473,6 @@ traverse_child_rec:
             }
             _err_if(push_stack_frame(&stack, &stack_ptr, &stack_size, \
                     idx, node_or_child, _done_funcall) == -1);
-
-            while (idx){
-                if (t_resolve_child(tree, node_or_child) -> ch == pattern[idx]){
-                    idx++;
-                    break;
-                }
-                idx = lps[idx - 1];
-            }
-
             node_or_child = t_resolve_child(tree, node_or_child) -> node;
             stage = _first_visit;
             goto traverse_tree_rec;
